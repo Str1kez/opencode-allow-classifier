@@ -206,6 +206,7 @@ test("guard cancels the allowlist for secrets and writes", async () => {
     [["rg --pre 'rm -rf' TODO"], "guard:rg-preprocessor"],
     [["ls && rm -rf /"], "guard:shell-operator"],
     [["cat $(echo secret)"], "guard:shell-substitution"],
+    [["ls `rm -rf /tmp/x`"], "guard:shell-backtick"],
   ];
 
   try {

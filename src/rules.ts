@@ -122,4 +122,7 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // A scanner that failed to split leaves chaining inside one resource; never allow that.
   { name: "shell-operator", kind: "token", values: [";", "&", "&&", "|", "||", "`"] },
   { name: "shell-substitution", kind: "substring", value: "$(" },
+  // Backticks are the other substitution form. Matched as a substring: the tokenizer glues a backtick
+  // to the command it wraps, so the token rule above never sees a bare one.
+  { name: "shell-backtick", kind: "substring", value: "`" },
 ];
