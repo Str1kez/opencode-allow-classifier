@@ -1,12 +1,15 @@
 import { Plugin } from "@opencode/plugin/effect";
+import type { PermissionEvaluation } from "@opencode/plugin/effect/permission";
 import { Effect } from "effect";
-import { readOptions } from "./options.ts";
+import { openAuditLog, toAuditEntry, type AuditLog } from "./audit.ts";
+import { readOptions, type ClassifierOptions } from "./options.ts";
 import { openCodeStateDirectory } from "./paths.ts";
+import { decide } from "./policy.ts";
 import { openRawEventLog, type RawEventLog } from "./raw-log.ts";
 
 export const PLUGIN_ID = "str1kez.allow-classifier";
 
-function startRawEventLog(options: ReturnType<typeof readOptions>): RawEventLog | undefined {
+function startRawEventLog(options: ClassifierOptions): RawEventLog | undefined {
   if (!options.logRaw) return undefined;
 
   try {
@@ -19,17 +22,39 @@ function startRawEventLog(options: ReturnType<typeof readOptions>): RawEventLog 
 }
 
 /**
- * Diagnostic slice: registers the `evaluate` hook and, behind `log_raw`, records every evaluation it receives.
- * It never touches `evaluation.effect`, so the permission policy stays exactly as configured.
+ * One evaluated call. Non-shell actions and events that already have a definite effect never reach the
+ * classifier and never touch the audit log; `deny` does not even reach the hook.
+ */
+function evaluate(evaluation: PermissionEvaluation, cwd: string, audit: AuditLog): void {
+  if (evaluation.action !== "shell" || evaluation.effect !== "ask") return;
+
+  const decision = decide(evaluation.resources, cwd);
+  if (decision.verdict === "allow") evaluation.effect = "allow";
+
+  audit.write(toAuditEntry(decision, evaluation, cwd));
+}
+
+/**
+ * Auto mode pipeline: hard-ask → allowlist with guard → default `ask`. The classifier and its cache
+ * plug in between the allowlist and the default in the next slice, which is why `decide` already
+ * returns a full decision record instead of a boolean.
  */
 export const ServerPlugin = Plugin.define({
   id: PLUGIN_ID,
   effect: (ctx) =>
     Effect.gen(function* () {
-      const log = startRawEventLog(readOptions(ctx.options));
+      const options = readOptions(ctx.options);
+      if (!options.enabled) return;
+
+      const rawLog = startRawEventLog(options);
+      const audit = openAuditLog(options.auditDirectory ?? openCodeStateDirectory());
+      const cwd = ctx.location.directory;
 
       yield* ctx.permission.hook("evaluate", (evaluation) =>
-        log ? Effect.sync(() => log.write(evaluation)) : Effect.void,
+        Effect.sync(() => {
+          rawLog?.write(evaluation);
+          evaluate(evaluation, cwd, audit);
+        }),
       );
     }),
 });
