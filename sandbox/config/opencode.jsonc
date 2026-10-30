@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Test profile: the same catch-all ask as the host, so the plugin is exercised
+  // for real. Headless runs auto-reject an `ask`, which is the point: a smoke
+  // run either executes (the plugin downgraded it) or shows up in the audit.
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+
+    // Deny rules stay after the catch-all. The hook is never called for them,
+    // so the classifier cannot overturn a ban.
+    { "action": "shell", "resource": "git push --force*", "effect": "deny" },
+    { "action": "shell", "resource": "git push -f*", "effect": "deny" },
+    { "action": "shell", "resource": "git reset --hard*", "effect": "deny" },
+    { "action": "shell", "resource": "rm -rf*", "effect": "deny" },
+    { "action": "shell", "resource": "*--no-verify*", "effect": "deny" },
+    { "action": "shell", "resource": "*--dangerously-skip-permissions*", "effect": "deny" }
+  ],
+  // No provider overrides: the container talks to the providers directly, using
+  // the credentials imported into the data volume.
+  "plugins": [
+    {
+      "package": "/home/node/repo",
+      "options": {
+        "enabled": true,
+        "audit_dir": "/sandbox-runtime/audit",
+        "log_dir": "/sandbox-runtime/raw"
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+name: opencode-sandbox
+
+services:
+  agent:
+    build:
+      context: .
+      args:
+        OPENCODE_VERSION: "2.2.4"
+    image: opencode-sandbox:2.2.4
+    init: true
+    working_dir: /home/node/repo
+    environment:
+      OPENCODE_DISABLE_AUTOUPDATE: "1"
+    volumes:
+      # The plugin under test is the mounted repo, not a copy inside the image.
+      - ..:/home/node/repo
+      - opencode-modules:/home/node/repo/node_modules
+      - ./config:/opt/sandbox-config:ro
+      - opencode-config:/home/node/.config/opencode
+      - opencode-data:/home/node/.local/share/opencode
+      - opencode-cache:/home/node/.cache/opencode
+      # Audit and raw logs land here so the host agent can read them directly.
+      - ./.runtime:/sandbox-runtime
+    tty: true
+
+volumes:
+  opencode-modules:
+  opencode-data:
+  opencode-cache:
+  opencode-config:

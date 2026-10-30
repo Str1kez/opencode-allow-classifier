@@ -6,6 +6,10 @@
 
 ### Добавлено
 
+- Docker-sandbox `sandbox/` для headless-смоуков и тестов: образ с OpenCode
+  2.2.4 и Node 26, профиль с тем же catch-all `ask` и deny-правилами, плагин
+  подключён смонтированным репозиторием. Креды провайдеров импортируются в
+  volume из `opencode auth export`, аудит складывается в `sandbox/.runtime/`.
 - Пайплайн auto mode без модели: hard-ask, allowlist read-only команд с
   гардом на секреты и записи, дефолт `ask`.
 - Аудит решений в `evaluate-YYYY-MM.jsonl` в state-каталоге OpenCode;
