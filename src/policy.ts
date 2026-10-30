@@ -7,6 +7,7 @@ import {
   type GuardRule,
   type HardAskRule,
 } from "./rules.ts";
+import { findExecCommands } from "./find.ts";
 import {
   escapesCwd,
   isPathLike,
@@ -14,6 +15,7 @@ import {
   programOf,
   resolvesOutsideCwd,
   resolvesToCwd,
+  shellActiveText,
   tokenize,
   type RealPathResolver,
 } from "./shell.ts";
@@ -189,10 +191,13 @@ function matchesAllowlist(rule: AllowlistRule, tokens: ReadonlyArray<string>): b
 
 /**
  * Every shape the shell could hand to the program: the raw resource, the same text with quotes removed
- * (`cat ".en""v"` is `.env`), and the glued tokens. A guard fires when any of them matches.
+ * (`cat ".en""v"` is `.env`), the glued tokens, and the text with backslash escapes resolved
+ * (`cat .\env` is `cat .env`). A guard fires when any of them matches.
  */
 function guardTexts(segment: Segment): ReadonlyArray<string> {
-  return [segment.text, segment.expanded, segment.tokens.join(" ")].map((text) => text.toLowerCase());
+  return [segment.text, segment.expanded, segment.tokens.join(" "), segment.text.replaceAll(/\\(.)/g, "$1")].map(
+    (text) => text.toLowerCase(),
+  );
 }
 
 /** `grep -r`, `-R`, `-rn`, `-d` and their long forms. */
@@ -337,11 +342,21 @@ function matchesGuard(rule: GuardRule, segment: Segment, cwd: string, realpath: 
     case "substring":
       // Case-insensitive because macOS filesystems are: `cat CREDENTIALS` reads the same file.
       return guardTexts(segment).some((text) => text.includes(rule.value));
+    case "active-substring":
+      // Quoting matters here: `rg 'a > b'` passes one literal argument and no shell acts on it, while
+      // `rg "$(id)"` still expands inside double quotes.
+      return shellActiveText(segment.text).includes(rule.value);
     case "metacharacter":
-      // Raw text on purpose: tokenizing glues `;` to the previous word and hides the operator.
-      // Trailing whitespace is trimmed so a resource that ends in a newline from the scanner is not
-      // mistaken for an internal line break; an internal newline still asks.
-      return rule.values.some((value) => segment.text.trimEnd().includes(value));
+      // Quoted and escaped text is blanked first: `rg "a|b"` is one literal argument, `find -name
+      // '*.ts'` never reaches the shell. Inside double quotes only `$`, backtick, `\` and `!` survive.
+      // The trailing `{}` placeholder from `find -exec ... {} \;` is not an operator either; the
+      // expression itself is validated by the `find-exec` guard.
+      return rule.values.some((value) =>
+        shellActiveText(segment.text)
+          .trimEnd()
+          .replaceAll("{}", " ")
+          .includes(value),
+      );
     case "token":
       return rule.values.some((value) => segment.tokens.includes(value));
     case "short-flag":
@@ -363,6 +378,18 @@ function matchesGuard(rule: GuardRule, segment: Segment, cwd: string, realpath: 
       return hasRgUnrestrictedFlag(segment.tokens);
     case "cwd-root-search":
       return searchesCwdRecursively(segment.tokens, cwd);
+    case "find-exec": {
+      // A read-only program can still carry a dangerous flag: `find . -exec grep -r x {} \;` recurses
+      // into a directory and reads the files its name never mentions. Run the spawned argv through
+      // every other guard, exactly as if it had been typed on its own.
+      const commands = findExecCommands(segment.tokens);
+      if (commands === undefined) return true;
+
+      return commands.some((argv) => {
+        const spawned: Segment = { text: argv.join(" "), expanded: argv.join(" "), tokens: argv };
+        return GUARD_RULES.some((guard) => guard.kind !== "find-exec" && matchesGuard(guard, spawned, cwd, realpath));
+      });
+    }
   }
 }
 

@@ -214,7 +214,7 @@ test("allowlist does not allow commands it cannot prove read-only", async () => 
     "git stash pop",
     "sed -i s/a/b/ file",
     "awk '{print $1}' file",
-    "find . -name '*.ts'",
+    "find . -exec cat .env \\;",
     "env",
   ];
 
@@ -345,8 +345,9 @@ test("the spec verdict table holds", async () => {
     ["ls", "allow"],
     ["rm ../x", "ask"],
     ["npm install", "ask"],
-    // Find is not on the allowlist, so read-only `-exec` is not distinguished from a mutating one yet.
-    ["find . -exec grep -l x {} \\;", "ask"],
+    // `find` is allowlisted, but only with a read-only `-exec`: the guard validates the spawned program.
+    ["find . -exec grep -l x {} \\;", "allow"],
+    ["find . -name '*.ts' -exec wc -l {} +", "allow"],
   ];
 
   try {
@@ -533,12 +534,10 @@ test("shell metacharacters anywhere in a resource ask", async () => {
     ["cat README.md&", "guard:shell-metacharacter"],
     ["cat README.md < input.txt", "guard:shell-metacharacter"],
     ["cat {a,b}", "guard:shell-metacharacter"],
-    ["rg 'a;b'", "guard:shell-metacharacter"],
-    ['rg "foo|bar"', "guard:shell-metacharacter"],
     ["cat .en?", "guard:shell-metacharacter"],
     ["cat .e*", "guard:shell-metacharacter"],
     ["cat .[e]nv", "guard:shell-metacharacter"],
-    ["cat .\\env", "guard:shell-metacharacter"],
+    ["cat .\\env", "guard:secret-env"],
     ["cat $'\\x2eenv'", "guard:shell-metacharacter"],
   ];
 
@@ -561,7 +560,6 @@ test("specific guard names win over the metacharacter catch-all", async () => {
     ["ls && rm -rf /", "guard:shell-operator"],
     ["cat $(echo secret)", "guard:shell-substitution"],
     ["ls `rm -rf /tmp/x`", "guard:shell-backtick"],
-    ["git log --grep='a>b'", "guard:redirect"],
     ["rg --pre 'rm -rf' TODO", "guard:rg-preprocessor"],
   ];
 

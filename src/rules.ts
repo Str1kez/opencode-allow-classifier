@@ -2,6 +2,7 @@
  * Rule tables. Everything a rule can decide lives here as data; `policy.ts` only walks the tables.
  * Adding a command or a secret guard means adding an entry, not touching the pipeline.
  */
+import { FIND_WRITE_PREDICATES } from "./find.ts";
 
 /** A command shape that always goes to the human, before the model is ever considered. */
 export interface HardAskRule {
@@ -88,6 +89,8 @@ export const ALLOWLIST_RULES: readonly AllowlistRule[] = [
   { name: "uname", prefix: ["uname"] },
   { name: "rg", prefix: ["rg"] },
   { name: "grep", prefix: ["grep"] },
+  // `find` itself only walks; the guard below validates the program it spawns after `-exec`.
+  { name: "find", prefix: ["find"] },
   { name: "jq", prefix: ["jq"] },
   { name: "git-status", prefix: ["git", "status"] },
   { name: "git-diff", prefix: ["git", "diff"] },
@@ -124,21 +127,20 @@ export type GuardRule =
   /** A search flag that turns off ignore files, hidden-file skipping or binary detection. */
   | { readonly name: string; readonly kind: "unrestricted-search"; readonly program?: string }
   /** A recursive search rooted at the working directory itself: the root guard never sees `.env`. */
-  | { readonly name: string; readonly kind: "cwd-root-search"; readonly program?: string };
+  | { readonly name: string; readonly kind: "cwd-root-search"; readonly program?: string }
+  /** `find -exec PROG`: every spawned program must be read-only and resolved through a trusted path. */
+  | { readonly name: string; readonly kind: "find-exec"; readonly program?: string }
+  /** Matched against text the shell would still act on: quoted literals do not count. */
+  | { readonly name: string; readonly kind: "active-substring"; readonly value: string };
 
 /**
  * Directories whose contents are installed by the system or the package manager. A program reached
  * through any other path may be a local shim that happens to share a read-only command's name.
+ *
+ * Defined in `shell.ts` because `find -exec` validates its spawned program against the same list and
+ * `find.ts` must not import the rule table.
  */
-export const TRUSTED_PROGRAM_DIRECTORIES: readonly string[] = [
-  "/bin",
-  "/usr/bin",
-  "/usr/local/bin",
-  "/opt/homebrew/bin",
-  "/opt/homebrew/sbin",
-  "/usr/sbin",
-  "/sbin",
-];
+export { TRUSTED_PROGRAM_DIRECTORIES } from "./shell.ts";
 
 /**
  * Order is the rule contract: the first match wins and its name lands in the audit log. Specific
@@ -194,7 +196,7 @@ export const GUARD_RULES: readonly GuardRule[] = [
   { name: "jq-environment", kind: "substring", value: "env", program: "jq" },
 
   // Any write: `>` also covers `>>`, `2>` and `&>`.
-  { name: "redirect", kind: "substring", value: ">" },
+  { name: "redirect", kind: "active-substring", value: ">" },
   { name: "tee", kind: "token", values: ["tee"] },
   { name: "output-short-flag", kind: "short-flag", value: "-o" },
   { name: "output-long-flag", kind: "long-flag", value: "--output" },
@@ -232,10 +234,10 @@ export const GUARD_RULES: readonly GuardRule[] = [
 
   // A scanner that failed to split leaves chaining inside one resource; never allow that.
   { name: "shell-operator", kind: "token", values: [";", "&", "&&", "|", "||", "`"] },
-  { name: "shell-substitution", kind: "substring", value: "$(" },
+  { name: "shell-substitution", kind: "active-substring", value: "$(" },
   // Backticks are the other substitution form. Matched as a substring: the tokenizer glues a backtick
   // to the command it wraps, so the token rule above never sees a bare one.
-  { name: "shell-backtick", kind: "substring", value: "`" },
+  { name: "shell-backtick", kind: "active-substring", value: "`" },
 
   // Reads must stay inside the working directory: the read permission policy never sees a shell
   // command, so an allow here would hand the agent every file the user can read.
@@ -247,6 +249,11 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // GNU/BSD grep has no ignore files at all: `grep -r . .` reads `.env` by construction. Recursion
   // is allowed only when its root is narrower than the working directory itself.
   { name: "recursive-search", kind: "cwd-root-search", program: "grep" },
+
+  // `find . -delete` writes, `find . -exec sh -c '...'` runs code, `-execdir`/`-ok` bypass the exec
+  // validation. The exec guard then allows only read-only programs behind a trusted path.
+  { name: "find-write", kind: "token", values: FIND_WRITE_PREDICATES, program: "find" },
+  { name: "find-exec", kind: "find-exec", program: "find" },
 
   // Catch-all for anything else the shell would interpret: `;`, newlines, `&`, `<`, parentheses,
   // braces, backslashes, history expansion, globs and bracket expressions. Checked on the raw resource

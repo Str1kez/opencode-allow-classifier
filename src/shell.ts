@@ -108,6 +108,64 @@ export function resolvesToCwd(target: string, cwd: string): boolean {
 }
 
 /**
+ * The characters a shell would still act on, with quoted and escaped text blanked out.
+ *
+ * The guard checks raw text because tokenizing glues `;` to the previous word. That is also why the
+ * raw text cannot be trusted blindly in the other direction: `rg "a|b"` is one literal argument, and
+ * `find -name '*.ts'` is a pattern the shell never expands. Inside single quotes nothing is active;
+ * inside double quotes only `$`, a backtick, a backslash and `!` still are.
+ */
+export function shellActiveText(raw: string): string {
+  let active = "";
+  let quote: '"' | "'" | undefined;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index]!;
+
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      active += " ";
+      continue;
+    }
+
+    if (quote === '"') {
+      if (character === '"') {
+        quote = undefined;
+        active += " ";
+        continue;
+      }
+      if (character === "\\") {
+        // Inside double quotes a backslash only escapes `"`, `\`, `$` and a backtick; anything else
+        // is the literal backslash the program receives, so only the pair is blanked.
+        const next = raw[index + 1];
+        active += " ";
+        if (next !== undefined && '"$`\\'.includes(next)) {
+          active += " ";
+          index += 1;
+        }
+        continue;
+      }
+      active += "$()`!".includes(character) || character === "\u001b" ? character : " ";
+      continue;
+    }
+
+    if (character === "\\") {
+      active += " ";
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      active += " ";
+      continue;
+    }
+    active += character;
+  }
+
+  return active;
+}
+
+/**
  * A program invoked through a path (`./cat`, `/tmp/evil/git`) is only provably the program it claims
  * to be when it lives in a system directory. Bare names are left to `PATH` without an I/O lookup.
  */
@@ -115,3 +173,17 @@ export function isTrustedProgramPath(token: string, trustedDirectories: Readonly
   if (!token.includes("/")) return true;
   return trustedDirectories.includes(dirname(token));
 }
+
+/**
+ * Directories whose contents are installed by the system or the package manager. A program reached
+ * through any other path may be a local shim that happens to share a read-only command's name.
+ */
+export const TRUSTED_PROGRAM_DIRECTORIES: readonly string[] = [
+  "/bin",
+  "/usr/bin",
+  "/usr/local/bin",
+  "/opt/homebrew/bin",
+  "/opt/homebrew/sbin",
+  "/usr/sbin",
+  "/sbin",
+];
