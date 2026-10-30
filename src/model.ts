@@ -50,9 +50,9 @@ function readAnswer(answer: DecisionAnswer | undefined): ModelAnswer {
  */
 export function createGenerateAsk(
   decisions: DecisionsOperation,
-  timeoutMs: number = CLASSIFIER_TIMEOUT_MS,
+  defaultTimeoutMs: number = CLASSIFIER_TIMEOUT_MS,
 ): AskModel {
-  return async (model, prompt) => {
+  return async (model, prompt, timeoutMs = defaultTimeoutMs) => {
     let effect: ReturnType<DecisionsOperation>;
     try {
       effect = decisions({

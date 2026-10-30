@@ -10,7 +10,7 @@ import {
 import { evaluate, type CachedVerdict, type PipelineOptions } from "../src/pipeline.ts";
 
 const CWD = "/Users/test/project";
-const REQUEST = { cwd: CWD, agent: "build", task: "run the linter" };
+const REQUEST = { cwd: CWD, agent: "build", readTask: async () => "run the linter" };
 
 interface Recorder {
   readonly calls: Array<{ model: string; prompt: string }>;
@@ -186,7 +186,9 @@ test("a provider error retries with the fallback model, then reports error", asy
 });
 
 test("a thrown classifier error leaves ask with source error", async () => {
+  let calls = 0;
   const ask: AskModel = async () => {
+    calls += 1;
     throw new Error("boom");
   };
   const decision = await evaluate({ ...REQUEST, resources: ["make lint"] }, options(ask));
@@ -194,7 +196,9 @@ test("a thrown classifier error leaves ask with source error", async () => {
   assert.equal(decision.verdict, "ask");
   assert.equal(decision.source, "error");
   assert.equal(decision.rule, "classifier:error");
-  assert.equal(decision.model, null);
+  // The audit names the model that actually failed, even when the adapter threw instead of answering.
+  assert.equal(decision.model, DEFAULT_MODEL);
+  assert.equal(calls, 1);
 });
 
 test("errors are not cached: the next identical call asks the model again", async () => {
@@ -225,11 +229,47 @@ test("an empty resource list never reaches the model", async () => {
 test("the task reaches the model prompt truncated", async () => {
   const model = recorder(ok(0.95));
   await evaluate(
-    { ...REQUEST, task: `x${"y".repeat(2500)}`, resources: ["make lint"] },
+    { ...REQUEST, readTask: async () => `x${"y".repeat(2500)}`, resources: ["make lint"] },
     options(model.ask),
   );
 
   const prompt = model.calls[0]?.prompt ?? "";
   assert.ok(prompt.includes("\"task\":\"xy"));
   assert.ok(prompt.length < 2500 + 500);
+});
+
+test("the task is read only when the model is asked", async () => {
+  const model = recorder(ok(0.95));
+  let reads = 0;
+  const readTask = async () => {
+    reads += 1;
+    return "run the linter";
+  };
+
+  await evaluate({ ...REQUEST, readTask, resources: ["sudo ls"] }, options(model.ask));
+  assert.equal(reads, 0, "hard-ask must not touch the session");
+
+  await evaluate({ ...REQUEST, readTask, resources: ["ls"] }, options(model.ask));
+  assert.equal(reads, 0, "an allowlist hit must not touch the session");
+
+  await evaluate({ ...REQUEST, readTask, resources: ["make lint"] }, options(model.ask));
+  assert.equal(reads, 1);
+});
+
+test("a failing task read still lets the model decide", async () => {
+  const model = recorder(ok(0.95));
+  const decision = await evaluate(
+    {
+      ...REQUEST,
+      readTask: async () => {
+        throw new Error("session store is down");
+      },
+      resources: ["make lint"],
+    },
+    options(model.ask),
+  );
+
+  assert.equal(decision.verdict, "ask");
+  assert.equal(decision.source, "error");
+  assert.equal(model.calls.length, 0);
 });

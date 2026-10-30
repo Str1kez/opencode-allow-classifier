@@ -28,7 +28,11 @@ export interface EvaluationInput {
   readonly resources: ReadonlyArray<string>;
   readonly cwd: string;
   readonly agent?: string;
-  readonly task?: string | null;
+  /**
+   * Read lazily: the session lookup costs a round-trip and may hang, so a hard-ask or an allowlist hit
+   * must never pay for it. Only a call that actually reaches the model asks for the task.
+   */
+  readonly readTask?: () => Promise<string | null>;
 }
 
 /** Carries the failing model through the cache, which stores values and rejects errors. */
@@ -66,16 +70,16 @@ export async function evaluate(input: EvaluationInput, options: PipelineOptions)
   const ask = options.ask;
   if (ask === undefined) return staticDecision;
 
-  const task = normalizeTask(input.task);
-  const request: ClassificationRequest = {
-    commands: input.resources,
-    cwd: input.cwd,
-    agent: input.agent ?? null,
-    task,
-  };
   const threshold = options.threshold ?? SAFETY_THRESHOLD;
 
   try {
+    const task = normalizeTask(input.readTask === undefined ? null : await input.readTask());
+    const request: ClassificationRequest = {
+      commands: input.resources,
+      cwd: input.cwd,
+      agent: input.agent ?? null,
+      task,
+    };
     const outcome = await options.cache.getOrCompute(
       verdictCacheKey(input.cwd, input.resources),
       async () => {

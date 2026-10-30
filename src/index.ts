@@ -2,7 +2,7 @@ import { realpathSync } from "node:fs";
 import { Plugin } from "@opencode/plugin/effect";
 import type { Context as PluginContext } from "@opencode/plugin/effect/plugin";
 import type { PermissionEvaluation } from "@opencode/plugin/effect/permission";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { openAuditLog, toAuditEntry, type AuditEntry, type AuditLog } from "./audit.ts";
 import { createVerdictCache } from "./cache.ts";
 import { normalizeTask } from "./classifier.ts";
@@ -42,17 +42,23 @@ function startRawEventLog(options: ClassifierOptions): RawEventLog | undefined {
 /**
  * The last user message is the task behind the shell call, and it is untrusted input to the model.
  * A session that cannot be read is not a reason to fail the permission decision: the classifier just
- * gets no task.
+ * gets no task. The timeout matters because the read happens inside the permission hook: a session
+ * store that never answers must not hold the hook open.
  */
+const SESSION_READ_TIMEOUT_MS = 1500;
+
 async function readLastUserMessage(
   ctx: PluginContext,
   sessionID: PermissionEvaluation["sessionID"],
 ): Promise<string | null> {
   try {
-    const messages = await Effect.runPromise(ctx.session.context({ sessionID }));
+    const messages = await Effect.runPromise(
+      Effect.timeoutOption(ctx.session.context({ sessionID }), SESSION_READ_TIMEOUT_MS),
+    );
+    if (Option.isNone(messages)) return null;
 
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
+    for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+      const message = messages.value[index];
       if (message?.type === "user") return normalizeTask(message.text);
     }
     return null;
@@ -108,12 +114,15 @@ export const ServerPlugin = Plugin.define({
           rawLog?.write(evaluation);
           if (evaluation.action !== "shell" || evaluation.effect !== "ask") return;
 
-          const task = await readLastUserMessage(ctx, evaluation.sessionID);
+          let task: string | null = null;
           const input: EvaluationInput = {
             resources: [...evaluation.resources],
             cwd,
             agent: evaluation.agent,
-            task,
+            readTask: async () => {
+              task = await readLastUserMessage(ctx, evaluation.sessionID);
+              return task;
+            },
           };
           const decision = await evaluate(input, { cache, ask, realpath: realPath });
 
