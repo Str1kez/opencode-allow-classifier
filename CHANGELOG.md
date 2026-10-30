@@ -26,6 +26,19 @@
   `.config/gh`, history-файлы, `*.pem`, `/proc/`, `secrets`; отдельно
   закрыты флаги чтения файла (`--contents`, `--slurpfile`, `--rawfile`,
   `--from-file`, `jq -f`) и дамп окружения через `jq env`.
+- Allowlist больше не читает вне cwd: `cat ~/notes.txt`, `cat ../x`,
+  `du -a /`, `rg TODO ~` уходят в `ask`.
+- Программа, вызванная через путь, исполняется только из доверенных
+  каталогов: `./cat`, `/tmp/evil/git` уходят в `ask`.
+- Рекурсивный поиск не читает секреты, которых нет в argv: `rg -u`/`-uuu`/
+  `--hidden`/`--no-ignore*` и `grep -r` с корнем в cwd уходят в `ask`.
+- Список секретов дополнен `.gnupg`, `.password-store`, `.vault-token`,
+  ключами самого агента, `Library/Keychains`, `.config/solana`,
+  `.git/`, `*.p12`, `*.key`.
+- Управляющие байты в выводе больше не проходят: `git log --format=%x1b`
+  и литеральный ESC уходят в `ask`.
+- Закрыты `date -s`, `tail -f`, `/dev/urandom` и `cat -`; хвостовой перевод
+  строки от сканера больше не вызывает ложный `ask`.
 - `git --ext-diff` и `--textconv` больше не считаются read-only.
 - Hard-ask видит программу за env-префиксами, обёртками и глобальными
   флагами git: `git -C /tmp push`, `FOO=1 sudo`, `nohup sudo`, `doas`,

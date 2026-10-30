@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 /**
  * Splits one resource — a command segment the permission scanner already cut on `&&` and `|` — into
@@ -57,9 +57,34 @@ export function programOf(token: string | undefined): string {
  * `rm ./project/../x` is outside even though the raw text starts with the directory name.
  */
 export function resolvesOutsideCwd(target: string, cwd: string): boolean {
+  // `~user` names another account's home, which this process cannot expand; treat it as outside.
+  if (target.startsWith("~") && target !== "~" && !target.startsWith("~/")) return true;
+
   const expanded = target === "~" ? homedir() : target.startsWith("~/") ? join(homedir(), target.slice(2)) : target;
   const resolved = resolve(cwd, expanded);
   const base = resolve(cwd);
 
   return resolved !== base && !resolved.startsWith(base + sep);
+}
+
+/**
+ * Arguments that name a filesystem location rather than a flag, pattern or ref. A bare relative
+ * filename cannot escape `cwd`, so only absolute paths, `..` chains and home references qualify.
+ */
+export function isPathLike(token: string): boolean {
+  return token === "." || token === ".." || token.startsWith("~") || token.includes("/");
+}
+
+/** `~` and `.` aliases of the working directory itself, used to spot a recursive search of everything. */
+export function resolvesToCwd(target: string, cwd: string): boolean {
+  return resolve(cwd, target) === resolve(cwd);
+}
+
+/**
+ * A program invoked through a path (`./cat`, `/tmp/evil/git`) is only provably the program it claims
+ * to be when it lives in a system directory. Bare names are left to `PATH` without an I/O lookup.
+ */
+export function isTrustedProgramPath(token: string, trustedDirectories: ReadonlyArray<string>): boolean {
+  if (!token.includes("/")) return true;
+  return trustedDirectories.includes(dirname(token));
 }

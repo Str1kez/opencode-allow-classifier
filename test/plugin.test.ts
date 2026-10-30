@@ -637,3 +637,145 @@ test("log_raw records non-shell and compound events verbatim", async () => {
     harness.dispose();
   }
 });
+
+test("reads are allowed only inside the working directory", async () => {
+  const harness = await start();
+  const allowed = ["rg TODO", "grep -rn TODO src", "cat src/a.ts", "cat README.md", "du -sh .", "ls ."];
+  const outside: ReadonlyArray<readonly [string, string]> = [
+    ["cat ../x", "guard:outside-cwd"],
+    ["cat ~/notes.txt", "guard:outside-cwd"],
+    ["cat /Users/other/file", "guard:outside-cwd"],
+    ["ls ../../..", "guard:outside-cwd"],
+    ["du -a /", "guard:outside-cwd"],
+    ["rg TODO ~", "guard:outside-cwd"],
+    ["rg -uuu -a -N . ~", "guard:outside-cwd"],
+    ["grep -r . /", "guard:outside-cwd"],
+    ["rg --files --hidden /", "guard:outside-cwd"],
+  ];
+
+  try {
+    for (const command of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+    }
+    for (const [command, rule] of outside) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("recursive search cannot read secrets the path guard never sees", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["rg -uuu -a . .", "guard:rg-unrestricted"],
+    ["rg --hidden TODO", "guard:rg-unrestricted"],
+    ["rg -u TODO src", "guard:rg-unrestricted"],
+    ["grep -r . .", "guard:recursive-search"],
+    ["grep -R TODO .", "guard:recursive-search"],
+    ["grep -d recurse TODO .", "guard:recursive-search"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    // Negative controls: plain rg skips hidden files and ignore files, a narrowed grep root is fine.
+    assert.equal(await verdict(harness, ["rg TODO"]), "allow");
+    assert.equal(await verdict(harness, ["grep -rn TODO src"]), "allow");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("a program reached through an untrusted path asks", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["./cat README.md", "guard:untrusted-binary"],
+    ["./ls", "guard:untrusted-binary"],
+    ["/tmp/evil/ls", "guard:untrusted-binary"],
+    ["/tmp/evil/git status", "guard:untrusted-binary"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    assert.equal(await verdict(harness, ["/bin/cat README.md"]), "allow");
+    assert.equal(await verdict(harness, ["/usr/bin/git status"]), "allow");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("guard covers agent and system secrets", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["cat ~/.vault-token", "guard:secret-vault-token"],
+    ["cat ~/.gnupg/secring.gpg", "guard:secret-gnupg"],
+    ["cat ~/.gnupg/private-keys-v1.d/x.key", "guard:secret-gnupg"],
+    ["cat ~/.password-store/git.gpg", "guard:secret-password-store"],
+    ["cat ~/.local/share/opencode/auth.json", "guard:secret-opencode-auth"],
+    ["cat ~/.config/opencode/opencode.json", "guard:secret-opencode-config"],
+    ["cat ~/Library/Keychains/login.keychain-db", "guard:secret-keychain"],
+    ["cat ~/.config/solana/id.json", "guard:secret-solana"],
+    ["cat server.key", "guard:secret-private-key"],
+    ["cat server.p12", "guard:secret-p12"],
+    ["cat .git/config", "guard:secret-git-config"],
+    ["cat ~/.cargo/credentials", "guard:secret-credentials"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("control bytes and unbounded reads ask", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["git log --format=%x1b]52;c;x", "guard:shell-metacharacter"],
+    ["echo \"\u001bhello\"", "guard:shell-metacharacter"],
+    ["date -s 2020-01-01", "guard:set-clock"],
+    ["date --set=2020-01-01", "guard:set-clock"],
+    ["cat /dev/urandom", "guard:endless-read"],
+    ["cat /dev/zero", "guard:endless-read"],
+    ["cat /dev/stdin", "guard:endless-read"],
+    ["cat -", "guard:stdin-read"],
+    ["tail -f /dev/null", "guard:tail-follow"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    assert.equal(await verdict(harness, ["git log --format=%h"]), "allow");
+    assert.equal(await verdict(harness, ["date -u"]), "allow");
+    // A trailing newline from the scanner is not an internal line break.
+    assert.equal(await verdict(harness, ["cat a\n"]), "allow");
+    assert.equal(await verdict(harness, ["cat README.md\n"]), "allow");
+  } finally {
+    harness.dispose();
+  }
+});

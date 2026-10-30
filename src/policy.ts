@@ -1,5 +1,13 @@
-import { ALLOWLIST_RULES, GUARD_RULES, HARD_ASK_RULES, type AllowlistRule, type GuardRule, type HardAskRule } from "./rules.ts";
-import { programOf, resolvesOutsideCwd, tokenize } from "./shell.ts";
+import {
+  ALLOWLIST_RULES,
+  GUARD_RULES,
+  HARD_ASK_RULES,
+  TRUSTED_PROGRAM_DIRECTORIES,
+  type AllowlistRule,
+  type GuardRule,
+  type HardAskRule,
+} from "./rules.ts";
+import { isPathLike, isTrustedProgramPath, programOf, resolvesOutsideCwd, resolvesToCwd, tokenize } from "./shell.ts";
 
 export type Verdict = "allow" | "ask";
 
@@ -183,7 +191,48 @@ function guardTexts(segment: Segment): ReadonlyArray<string> {
   return [segment.text, segment.expanded, segment.tokens.join(" ")].map((text) => text.toLowerCase());
 }
 
-function matchesGuard(rule: GuardRule, segment: Segment): boolean {
+/** `grep -r`, `-R`, `-rn`, `-d` and their long forms. */
+const GREP_RECURSIVE_SHORT = /^-[^-]*[rRd]/;
+const GREP_RECURSIVE_LONG = new Set(["--recursive", "--dereference-recursive", "--directories"]);
+
+/**
+ * `rg` flags that stop it from skipping hidden files, ignore files or binary files. Plain `rg` is a
+ * different command: `-u`/`--no-ignore*` and friends make it read `.env` without naming it.
+ */
+const RG_UNRESTRICTED_LONG = new Set(["--unrestricted", "--hidden", "--binary", "--text", "--follow"]);
+
+function hasRgUnrestrictedFlag(tokens: ReadonlyArray<string>): boolean {
+  return tokens.slice(1).some((token) => {
+    if (token.startsWith("--")) {
+      const name = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+      return RG_UNRESTRICTED_LONG.has(name) || name.startsWith("--no-ignore");
+    }
+    // Short clusters: `-u`, `-uuu`, `-a`, `-L`. `-U` (multiline) and `-A` (after-context) differ.
+    return /^-[^-]*[uaL]/.test(token);
+  });
+}
+
+function searchesCwdRecursively(tokens: ReadonlyArray<string>, cwd: string): boolean {
+  const args = tokens.slice(1);
+  const recursive = args.some((token) => {
+    if (token.startsWith("--")) {
+      const name = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+      return GREP_RECURSIVE_LONG.has(name);
+    }
+    return GREP_RECURSIVE_SHORT.test(token);
+  });
+  if (!recursive) return false;
+
+  // The root is cwd when a positional operand is `.`, `./` or the cwd path itself. A pattern of `.`
+  // is indistinguishable here and asks too; a false ask costs one keypress.
+  return args.some((token) => !token.startsWith("-") && resolvesToCwd(token, cwd));
+}
+
+function readsOutsideCwd(tokens: ReadonlyArray<string>, cwd: string): boolean {
+  return tokens.slice(1).some((token) => isPathLike(token) && resolvesOutsideCwd(token, cwd));
+}
+
+function matchesGuard(rule: GuardRule, segment: Segment, cwd: string): boolean {
   if ("program" in rule && rule.program !== undefined && programOf(segment.tokens[0]) !== rule.program) return false;
 
   switch (rule.kind) {
@@ -192,7 +241,9 @@ function matchesGuard(rule: GuardRule, segment: Segment): boolean {
       return guardTexts(segment).some((text) => text.includes(rule.value));
     case "metacharacter":
       // Raw text on purpose: tokenizing glues `;` to the previous word and hides the operator.
-      return rule.values.some((value) => segment.text.includes(value));
+      // Trailing whitespace is trimmed so a resource that ends in a newline from the scanner is not
+      // mistaken for an internal line break; an internal newline still asks.
+      return rule.values.some((value) => segment.text.trimEnd().includes(value));
     case "token":
       return rule.values.some((value) => segment.tokens.includes(value));
     case "short-flag":
@@ -200,6 +251,14 @@ function matchesGuard(rule: GuardRule, segment: Segment): boolean {
       return segment.tokens.some((token) => !token.startsWith("--") && token.startsWith(rule.value));
     case "long-flag":
       return segment.tokens.some((token) => matchesLongFlag(token, rule.value));
+    case "program-path":
+      return !isTrustedProgramPath(segment.tokens[0] ?? "", TRUSTED_PROGRAM_DIRECTORIES);
+    case "outside-cwd":
+      return readsOutsideCwd(segment.tokens, cwd);
+    case "unrestricted-search":
+      return hasRgUnrestrictedFlag(segment.tokens);
+    case "cwd-root-search":
+      return searchesCwdRecursively(segment.tokens, cwd);
   }
 }
 
@@ -238,7 +297,7 @@ export function decide(resources: ReadonlyArray<string>, cwd: string): Decision 
       return finish({ verdict: "ask", source: "default", rule: "no-allowlist-match", probability: null, model: null }, started);
     }
 
-    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, segment));
+    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, segment, cwd));
     if (guard !== undefined) {
       return finish(
         { verdict: "ask", source: "allowlist", rule: `guard:${guard.name}`, probability: null, model: null },

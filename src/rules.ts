@@ -113,8 +113,30 @@ export type GuardRule =
   | { readonly name: string; readonly kind: "substring"; readonly value: string; readonly program?: string }
   | { readonly name: string; readonly kind: "token"; readonly values: readonly string[]; readonly program?: string }
   | { readonly name: string; readonly kind: "short-flag"; readonly value: string; readonly program?: string }
-  | { readonly name: string; readonly kind: "long-flag"; readonly value: string }
-  | { readonly name: string; readonly kind: "metacharacter"; readonly values: readonly string[] };
+  | { readonly name: string; readonly kind: "long-flag"; readonly value: string; readonly program?: string }
+  | { readonly name: string; readonly kind: "metacharacter"; readonly values: readonly string[] }
+  /** The program is invoked through a path outside the trusted system directories. */
+  | { readonly name: string; readonly kind: "program-path" }
+  /** A positional operand resolves outside the working directory. */
+  | { readonly name: string; readonly kind: "outside-cwd" }
+  /** A search flag that turns off ignore files, hidden-file skipping or binary detection. */
+  | { readonly name: string; readonly kind: "unrestricted-search"; readonly program?: string }
+  /** A recursive search rooted at the working directory itself: the root guard never sees `.env`. */
+  | { readonly name: string; readonly kind: "cwd-root-search"; readonly program?: string };
+
+/**
+ * Directories whose contents are installed by the system or the package manager. A program reached
+ * through any other path may be a local shim that happens to share a read-only command's name.
+ */
+export const TRUSTED_PROGRAM_DIRECTORIES: readonly string[] = [
+  "/bin",
+  "/usr/bin",
+  "/usr/local/bin",
+  "/opt/homebrew/bin",
+  "/opt/homebrew/sbin",
+  "/usr/sbin",
+  "/sbin",
+];
 
 /**
  * Order is the rule contract: the first match wins and its name lands in the audit log. Specific
@@ -147,6 +169,25 @@ export const GUARD_RULES: readonly GuardRule[] = [
   { name: "secret-pem", kind: "substring", value: ".pem" },
   { name: "system-proc", kind: "substring", value: "/proc/" },
   { name: "secret-generic", kind: "substring", value: "secrets" },
+  { name: "secret-gnupg", kind: "substring", value: ".gnupg" },
+  { name: "secret-password-store", kind: "substring", value: ".password-store" },
+  { name: "secret-vault-token", kind: "substring", value: ".vault-token" },
+  { name: "secret-opencode-auth", kind: "substring", value: ".local/share/opencode" },
+  { name: "secret-opencode-config", kind: "substring", value: ".config/opencode" },
+  // Case-insensitive comparison on the resource side, so the value is lowercase.
+  { name: "secret-keychain", kind: "substring", value: "library/keychains" },
+  { name: "secret-solana", kind: "substring", value: ".config/solana" },
+  { name: "secret-git-config", kind: "substring", value: ".git/" },
+  { name: "secret-p12", kind: "substring", value: ".p12" },
+  // `.key` is the extension, not the word: `monkey` and `keyboard` carry no dot and stay allowed.
+  { name: "secret-private-key", kind: "substring", value: ".key" },
+  // Unbounded reads: never finish, or block on a terminal that will not close.
+  { name: "endless-read", kind: "substring", value: "/dev/urandom" },
+  { name: "endless-read", kind: "substring", value: "/dev/random" },
+  { name: "endless-read", kind: "substring", value: "/dev/zero" },
+  { name: "endless-read", kind: "substring", value: "/dev/stdin" },
+  { name: "endless-read", kind: "substring", value: "/dev/fd/" },
+  { name: "stdin-read", kind: "token", values: ["-"] },
   // `jq -n env` and `jq -n 'env.HOME'` print the whole environment without touching a file.
   { name: "jq-environment", kind: "substring", value: "env", program: "jq" },
 
@@ -173,19 +214,64 @@ export const GUARD_RULES: readonly GuardRule[] = [
   { name: "file-read-flag", kind: "long-flag", value: "--from-file" },
   { name: "jq-program-file", kind: "short-flag", value: "-f", program: "jq" },
 
+  // Commands that change state while looking like reads.
+  { name: "set-clock", kind: "short-flag", value: "-s", program: "date" },
+  { name: "set-clock", kind: "long-flag", value: "--set", program: "date" },
+  { name: "tail-follow", kind: "short-flag", value: "-f", program: "tail" },
+  { name: "tail-follow", kind: "short-flag", value: "-F", program: "tail" },
+  { name: "tail-follow", kind: "long-flag", value: "--follow", program: "tail" },
+
+  // A program reached through a local or untrusted path can be a shim with a harmless basename.
+  { name: "untrusted-binary", kind: "program-path" },
+
   // A scanner that failed to split leaves chaining inside one resource; never allow that.
   { name: "shell-operator", kind: "token", values: [";", "&", "&&", "|", "||", "`"] },
   { name: "shell-substitution", kind: "substring", value: "$(" },
   // Backticks are the other substitution form. Matched as a substring: the tokenizer glues a backtick
   // to the command it wraps, so the token rule above never sees a bare one.
   { name: "shell-backtick", kind: "substring", value: "`" },
+
+  // Reads must stay inside the working directory: the read permission policy never sees a shell
+  // command, so an allow here would hand the agent every file the user can read.
+  { name: "outside-cwd", kind: "outside-cwd" },
+
+  // Recursive search reads files whose names are not in argv, so the path guard cannot see them.
+  // Plain `rg` skips hidden files and honours ignore files; the flags below turn that off.
+  { name: "rg-unrestricted", kind: "unrestricted-search", program: "rg" },
+  // GNU/BSD grep has no ignore files at all: `grep -r . .` reads `.env` by construction. Recursion
+  // is allowed only when its root is narrower than the working directory itself.
+  { name: "recursive-search", kind: "cwd-root-search", program: "grep" },
+
   // Catch-all for anything else the shell would interpret: `;`, newlines, `&`, `<`, parentheses,
   // braces, backslashes, history expansion, globs and bracket expressions. Checked on the raw resource
   // before tokenization, because tokenizing glues `;` to the preceding word. Deliberately noisy:
   // `rg "a|b"` asks. A false ask costs one keypress, a false allow costs a shell.
+  // `%x` is git's hex-escape form and can emit an ESC byte; the literal ESC covers printf and echo.
   {
     name: "shell-metacharacter",
     kind: "metacharacter",
-    values: [";", "\n", "\r", "&", "|", "`", "$", "(", ")", "{", "}", "<", ">", "\\", "!", "*", "?", "[", "]"],
+    values: [
+      ";",
+      "\n",
+      "\r",
+      "&",
+      "|",
+      "`",
+      "$",
+      "(",
+      ")",
+      "{",
+      "}",
+      "<",
+      ">",
+      "\\",
+      "!",
+      "*",
+      "?",
+      "[",
+      "]",
+      "%x",
+      "\u001b",
+    ],
   },
 ];
