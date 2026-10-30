@@ -15,7 +15,7 @@ export interface AuditEntry {
   readonly probability: number | null;
   readonly model: string | null;
   readonly latency: number;
-  /** The user's request, once the classifier slice starts feeding it to the model. */
+  /** The user's last message, truncated to 2000 characters. `null` when it could not be read. */
   readonly task: string | null;
 }
 
@@ -34,6 +34,7 @@ export function toAuditEntry(
   evaluation: { readonly sessionID: string; readonly agent?: string; readonly resources: ReadonlyArray<string> },
   cwd: string,
   now: Date = new Date(),
+  task: string | null = null,
 ): AuditEntry {
   return {
     time: now.toISOString(),
@@ -47,7 +48,7 @@ export function toAuditEntry(
     probability: decision.probability,
     model: decision.model,
     latency: decision.latency,
-    task: null,
+    task,
   };
 }
 

@@ -7,6 +7,7 @@ import type { Context as PluginContext } from "@opencode/plugin/effect/plugin";
 import type { PermissionEvaluation } from "@opencode/plugin/effect/permission";
 import { Effect } from "effect";
 import ServerPlugin from "../src/index.ts";
+import type { DecisionsOperation, DecisionsOutput } from "../src/model.ts";
 
 const CWD = "/Users/test/project";
 const AUDIT_FILE = /^evaluate-\d{4}-\d{2}\.jsonl$/;
@@ -16,9 +17,21 @@ interface Harness {
   readonly logFile: string;
   readonly auditDirectory: string;
   readonly hookRegistered: boolean;
+  readonly modelCalls: Array<{ model: string; prompt: string }>;
   evaluate(input: PermissionEvaluation): Promise<void>;
   auditEntries(): Array<Record<string, unknown>>;
   dispose(): void;
+}
+
+interface World {
+  readonly decisions?: DecisionsOperation;
+  readonly probability?: number;
+  readonly messages?: ReadonlyArray<unknown>;
+  readonly contextError?: boolean;
+}
+
+function predicate(probability: number): DecisionsOutput {
+  return { answers: [{ type: "predicate", name: "safe", probability }] };
 }
 
 function evaluation(overrides: Partial<PermissionEvaluation> = {}): PermissionEvaluation {
@@ -31,11 +44,28 @@ function evaluation(overrides: Partial<PermissionEvaluation> = {}): PermissionEv
   };
 }
 
+/** The default fake model says "unsafe" so unrelated tests keep their old `ask` verdicts. */
+function defaultDecisions(calls: Harness["modelCalls"], probability = 0.1): DecisionsOperation {
+  return (input) => {
+    const part = input.input[0];
+    calls.push({
+      model: `${input.model.providerID}/${input.model.id}`,
+      prompt: part?.type === "text" ? part.text : "",
+    });
+    return Effect.succeed(predicate(probability));
+  };
+}
+
 /** Runs the plugin effect against a fake context and returns the hook callback it registered. */
-async function start(options: Record<string, unknown> = {}, cwd: string = CWD): Promise<Harness> {
+async function start(
+  options: Record<string, unknown> = {},
+  cwd: string = CWD,
+  world: World = {},
+): Promise<Harness> {
   const root = mkdtempSync(join(tmpdir(), "allow-classifier-"));
   const logDirectory = join(root, "state");
   const auditDirectory = join(root, "audit");
+  const modelCalls: Harness["modelCalls"] = [];
   let registered: ((input: PermissionEvaluation) => Effect.Effect<void>) | undefined;
 
   const context = {
@@ -48,6 +78,13 @@ async function start(options: Record<string, unknown> = {}, cwd: string = CWD): 
         return Effect.sync(() => ({ dispose: Effect.void }));
       },
     },
+    experimental: {
+      generate: { decisions: world.decisions ?? defaultDecisions(modelCalls, world.probability ?? 0.1) },
+    },
+    session: {
+      context: () =>
+        world.contextError === true ? Effect.die(new Error("session unavailable")) : Effect.succeed(world.messages ?? []),
+    },
   } as unknown as PluginContext;
 
   await Effect.runPromise(Effect.scoped(ServerPlugin.effect(context)));
@@ -57,6 +94,7 @@ async function start(options: Record<string, unknown> = {}, cwd: string = CWD): 
     logFile: join(logDirectory, "evaluate-raw.jsonl"),
     auditDirectory,
     hookRegistered: registered !== undefined,
+    modelCalls,
     async evaluate(input) {
       assert.ok(registered, "plugin did not register the evaluate hook");
       await Effect.runPromise(registered(input));
@@ -256,7 +294,7 @@ test("hard-ask sends privileged and irreversible commands to the human", async (
   }
 });
 
-test("rm inside cwd is not hard-ask, it falls through to the default ask", async () => {
+test("rm inside cwd is not hard-ask, it falls through to the classifier", async () => {
   const harness = await start();
   try {
     const input = evaluation({ resources: ["rm src/old.ts"] });
@@ -264,7 +302,7 @@ test("rm inside cwd is not hard-ask, it falls through to the default ask", async
 
     assert.equal(input.effect, "ask");
     const entry = harness.auditEntries().at(-1);
-    assert.deepEqual({ source: entry?.["source"], rule: entry?.["rule"] }, { source: "default", rule: "no-allowlist-match" });
+    assert.deepEqual({ source: entry?.["source"], rule: entry?.["rule"] }, { source: "model", rule: "classifier" });
   } finally {
     harness.dispose();
   }
@@ -375,6 +413,87 @@ test("audit records one monthly JSONL line per decision", async () => {
   }
 });
 
+test("the classifier allows an unknown command at 0.9 and audits the model verdict", async () => {
+  const harness = await start(
+    {},
+    CWD,
+    {
+      probability: 0.9,
+      messages: [
+        { type: "assistant", text: "ignored" },
+        { type: "user", text: "  please run the linter  " },
+      ],
+    },
+  );
+  try {
+    const input = evaluation({ resources: ["make lint"], agent: "build" as PermissionEvaluation["agent"] });
+    await harness.evaluate(input);
+
+    assert.equal(input.effect, "allow");
+    const entry = harness.auditEntries().at(-1);
+    assert.equal(entry?.["source"], "model");
+    assert.equal(entry?.["rule"], "classifier");
+    assert.equal(entry?.["verdict"], "allow");
+    assert.equal(entry?.["probability"], 0.9);
+    assert.equal(entry?.["model"], "opencode/jev-1.13-free");
+    assert.equal(entry?.["task"], "please run the linter");
+    assert.equal(typeof entry?.["latency"], "number");
+
+    assert.equal(harness.modelCalls.length, 1);
+    const prompt = harness.modelCalls[0]?.prompt ?? "";
+    for (const expected of ["make lint", CWD, "build", "please run the linter"]) {
+      assert.ok(prompt.includes(expected), `${expected} missing from the prompt`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("an unreadable session still gets a verdict, with a null task", async () => {
+  const harness = await start({}, CWD, { probability: 0.95, contextError: true });
+  try {
+    const input = evaluation({ resources: ["make lint"] });
+    await harness.evaluate(input);
+
+    assert.equal(input.effect, "allow");
+    const entry = harness.auditEntries().at(-1);
+    assert.equal(entry?.["source"], "model");
+    assert.equal(entry?.["task"], null);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("a repeated identical shell call comes from the cache", async () => {
+  const harness = await start({}, CWD, { probability: 0.95 });
+  try {
+    await harness.evaluate(evaluation({ resources: ["make lint"] }));
+    await harness.evaluate(evaluation({ resources: ["make lint"] }));
+
+    assert.equal(harness.modelCalls.length, 1);
+    assert.deepEqual(
+      harness.auditEntries().map((entry) => entry["source"]),
+      ["model", "cache"],
+    );
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("hard-ask never calls the model", async () => {
+  const harness = await start({}, CWD, { probability: 0.99 });
+  try {
+    const input = evaluation({ resources: ["git push origin main"] });
+    await harness.evaluate(input);
+
+    assert.equal(input.effect, "ask");
+    assert.equal(harness.modelCalls.length, 0);
+    assert.equal(harness.auditEntries().at(-1)?.["source"], "hard-ask");
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("audit write failure does not change the verdict", async () => {
   const root = mkdtempSync(join(tmpdir(), "allow-classifier-blocked-"));
   writeFileSync(join(root, "blocker"), "not a directory");
@@ -397,9 +516,10 @@ test("audit is appended across calls", async () => {
     const entries = harness.auditEntries();
     assert.deepEqual(
       entries.map((entry) => entry["source"]),
-      ["allowlist", "hard-ask", "default"],
+      ["allowlist", "hard-ask", "model"],
     );
     assert.equal(entries.at(-1)?.["verdict"], "ask");
+    assert.equal(harness.modelCalls.length, 1);
   } finally {
     harness.dispose();
   }
