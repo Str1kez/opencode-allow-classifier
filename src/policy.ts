@@ -21,8 +21,107 @@ export interface Decision {
 }
 
 interface Segment {
+  /** Raw resource as the scanner produced it, quotes and all. */
   readonly text: string;
+  /** Raw text with `"` and `'` removed: what the shell actually passes as one word. */
+  readonly expanded: string;
   readonly tokens: ReadonlyArray<string>;
+}
+
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** Programs that hide the real command behind an env prefix. */
+const WRAPPERS = new Set(["env", "nohup", "command", "time", "exec"]);
+/** Wrapper flags that consume the next token, so `env -u HOME sudo` still exposes `sudo`. */
+const WRAPPER_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir", "-o", "--output", "-a"]);
+
+/**
+ * Global flags that stand between a program and its subcommand. Values are written as separate tokens
+ * (`git -C /tmp push`) or attached (`--git-dir=/x`), which is why both forms are handled.
+ */
+const PROGRAM_GLOBAL_FLAGS: Readonly<Record<string, { readonly withValue: readonly string[]; readonly boolean: readonly string[] }>> = {
+  git: {
+    withValue: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"],
+    boolean: ["--no-pager", "--paginate", "--bare", "--literal-pathspecs", "--no-replace-objects", "--no-optional-locks"],
+  },
+  npm: {
+    withValue: ["--prefix", "--registry", "--cache", "--userconfig", "--loglevel", "--workspace", "-w"],
+    boolean: ["--global", "-g", "--silent", "-s", "--quiet", "-q"],
+  },
+  pnpm: {
+    withValue: ["--prefix", "-C", "--dir", "--filter", "-F", "--registry"],
+    boolean: ["--global", "-g", "--silent", "-s"],
+  },
+  yarn: {
+    withValue: ["--prefix", "--cwd", "--registry"],
+    boolean: ["--silent", "-s"],
+  },
+  uv: {
+    withValue: ["--directory", "--project", "--config-file"],
+    boolean: ["--no-config", "-q", "--quiet"],
+  },
+  brew: { withValue: [], boolean: ["--quiet", "-q", "--verbose", "-v"] },
+  cargo: { withValue: ["--root"], boolean: ["--quiet", "-q", "--verbose", "-v"] },
+};
+
+/**
+ * Resolves the command a segment actually runs, skipping env assignments (`FOO=1`), wrappers (`env`,
+ * `nohup`, `command`, `time`) and leading backslashes (`\sudo`). `undefined` means the segment only
+ * consists of prefixes. Global program flags are left in place; the hard-ask matcher skips them.
+ */
+function commandOf(tokens: ReadonlyArray<string>): { readonly program: string; readonly args: ReadonlyArray<string> } | undefined {
+  let index = 0;
+
+  while (index < tokens.length) {
+    let token = tokens[index]!;
+    while (token.startsWith("\\")) token = token.slice(1);
+
+    if (token.length === 0 || ENV_ASSIGNMENT.test(token)) {
+      index++;
+      continue;
+    }
+
+    const program = programOf(token);
+    if (!WRAPPERS.has(program)) return { program, args: tokens.slice(index + 1) };
+
+    index++;
+    while (index < tokens.length && tokens[index]!.startsWith("-")) {
+      index += WRAPPER_VALUE_FLAGS.has(tokens[index]!) ? 2 : 1;
+    }
+  }
+
+  return undefined;
+}
+
+/** Drops global flags so `git -C /tmp push` and `npm --prefix . install` match their subcommand. */
+function skipGlobalFlags(program: string, args: ReadonlyArray<string>): ReadonlyArray<string> {
+  const flags = PROGRAM_GLOBAL_FLAGS[program];
+  if (flags === undefined) return args;
+
+  let index = 0;
+  while (index < args.length) {
+    const token = args[index]!;
+    const name = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+
+    if (flags.withValue.includes(name)) {
+      index += token.includes("=") ? 1 : 2;
+      continue;
+    }
+    if (flags.boolean.includes(token)) {
+      index++;
+      continue;
+    }
+    // Attached short value: `-C/tmp`, `-cfoo=bar`.
+    const attached = flags.withValue.some(
+      (flag) => flag.startsWith("-") && !flag.startsWith("--") && token.startsWith(flag) && token.length > flag.length,
+    );
+    if (attached) {
+      index++;
+      continue;
+    }
+    break;
+  }
+
+  return args.slice(index);
 }
 
 /** Operands of `rm`: flags dropped, `--` honoured, `-` (stdin) is not a path. */
@@ -43,12 +142,17 @@ function rmOperands(tokens: ReadonlyArray<string>): string[] {
 }
 
 function matchesHardAsk(rule: HardAskRule, tokens: ReadonlyArray<string>, cwd: string): boolean {
-  if (!rule.programs.includes(programOf(tokens[0]))) return false;
+  const command = commandOf(tokens);
+  if (command === undefined || !rule.programs.includes(command.program)) return false;
 
-  if (rule.scope === "outside-cwd") return rmOperands(tokens).some((operand) => resolvesOutsideCwd(operand, cwd));
+  if (rule.scope === "outside-cwd") {
+    return rmOperands([command.program, ...command.args]).some((operand) => resolvesOutsideCwd(operand, cwd));
+  }
+  if (rule.bare === true) return command.args.length === 0;
   if (rule.arguments === undefined) return true;
 
-  return rule.arguments.some((run) => run.every((expected, index) => tokens[index + 1] === expected));
+  const args = skipGlobalFlags(command.program, command.args);
+  return rule.arguments.some((run) => run.every((expected, index) => args[index] === expected));
 }
 
 function matchesAllowlist(rule: AllowlistRule, tokens: ReadonlyArray<string>): boolean {
@@ -71,11 +175,24 @@ function matchesLongFlag(token: string, value: string): boolean {
   return token === value || token.startsWith(`${value}=`);
 }
 
+/**
+ * Every shape the shell could hand to the program: the raw resource, the same text with quotes removed
+ * (`cat ".en""v"` is `.env`), and the glued tokens. A guard fires when any of them matches.
+ */
+function guardTexts(segment: Segment): ReadonlyArray<string> {
+  return [segment.text, segment.expanded, segment.tokens.join(" ")].map((text) => text.toLowerCase());
+}
+
 function matchesGuard(rule: GuardRule, segment: Segment): boolean {
+  if ("program" in rule && rule.program !== undefined && programOf(segment.tokens[0]) !== rule.program) return false;
+
   switch (rule.kind) {
     case "substring":
       // Case-insensitive because macOS filesystems are: `cat CREDENTIALS` reads the same file.
-      return segment.text.toLowerCase().includes(rule.value);
+      return guardTexts(segment).some((text) => text.includes(rule.value));
+    case "metacharacter":
+      // Raw text on purpose: tokenizing glues `;` to the previous word and hides the operator.
+      return rule.values.some((value) => segment.text.includes(value));
     case "token":
       return rule.values.some((value) => segment.tokens.includes(value));
     case "short-flag":
@@ -96,7 +213,11 @@ function finish(decision: Omit<Decision, "latency">, started: number): Decision 
  */
 export function decide(resources: ReadonlyArray<string>, cwd: string): Decision {
   const started = performance.now();
-  const segments: Segment[] = resources.map((text) => ({ text, tokens: tokenize(text) }));
+  const segments: Segment[] = resources.map((text) => ({
+    text,
+    expanded: text.replace(/["']/g, ""),
+    tokens: tokenize(text),
+  }));
 
   if (segments.length === 0) {
     return finish({ verdict: "ask", source: "default", rule: "empty-resources", probability: null, model: null }, started);

@@ -404,3 +404,236 @@ test("audit is appended across calls", async () => {
     harness.dispose();
   }
 });
+
+test("shell metacharacters anywhere in a resource ask", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["cat x;git push --force", "guard:shell-metacharacter"],
+    ["cat x\ngit push --force", "guard:shell-metacharacter"],
+    ["cat README.md&", "guard:shell-metacharacter"],
+    ["cat README.md < input.txt", "guard:shell-metacharacter"],
+    ["cat {a,b}", "guard:shell-metacharacter"],
+    ["rg 'a;b'", "guard:shell-metacharacter"],
+    ['rg "foo|bar"', "guard:shell-metacharacter"],
+    ["cat .en?", "guard:shell-metacharacter"],
+    ["cat .e*", "guard:shell-metacharacter"],
+    ["cat .[e]nv", "guard:shell-metacharacter"],
+    ["cat .\\env", "guard:shell-metacharacter"],
+    ["cat $'\\x2eenv'", "guard:shell-metacharacter"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("specific guard names win over the metacharacter catch-all", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["echo hello > /tmp/x", "guard:redirect"],
+    ["ls && rm -rf /", "guard:shell-operator"],
+    ["cat $(echo secret)", "guard:shell-substitution"],
+    ["ls `rm -rf /tmp/x`", "guard:shell-backtick"],
+    ["git log --grep='a>b'", "guard:redirect"],
+    ["rg --pre 'rm -rf' TODO", "guard:rg-preprocessor"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("guard matches the quote-stripped spelling the shell executes", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ['cat ".en""v"', "guard:secret-env"],
+    ["cat .e''nv", "guard:secret-env"],
+    ['cat \'.en\'"v"', "guard:secret-env"],
+    ["cat .np''mrc", "guard:secret-npmrc"],
+    ["cat .en''v.local", "guard:secret-env"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("guard covers the extended secret list", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["cat ~/.netrc", "guard:secret-netrc"],
+    ["cat ~/.npmrc", "guard:secret-npmrc"],
+    ["cat .yarnrc.yml", "guard:secret-yarnrc"],
+    ["cat ~/.pgpass", "guard:secret-pgpass"],
+    ["cat ~/.git-credentials", "guard:secret-credentials"],
+    ["cat ~/.docker/config.json", "guard:secret-docker-config"],
+    ["cat ~/.kube/config", "guard:secret-kube-config"],
+    ["cat ~/.aws/config", "guard:secret-aws"],
+    ["cat ~/.azure/profile.json", "guard:secret-azure"],
+    ["cat ~/.config/gcloud/active_config", "guard:secret-gcloud"],
+    ["cat ~/.config/gh/hosts.yml", "guard:secret-gh"],
+    ["cat ~/.zsh_history", "guard:secret-zsh-history"],
+    ["cat ~/.bash_history", "guard:secret-bash-history"],
+    ["cat ~/.gitconfig", "guard:secret-gitconfig"],
+    ["cat ./id_ed25519", "guard:secret-id-ed25519"],
+    ["cat ./id_ecdsa", "guard:secret-id-ecdsa"],
+    ["cat server.pem", "guard:secret-pem"],
+    ["cat /proc/self/environ", "guard:system-proc"],
+    ["cat secrets.yaml", "guard:secret-generic"],
+    ["jq -n env", "guard:jq-environment"],
+    ["jq -n 'env.HOME'", "guard:jq-environment"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("guards that open files outside the positional operands ask", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["git blame --contents notes.txt src/index.ts", "guard:file-read-flag"],
+    ["jq -n --slurpfile data x.json .", "guard:file-read-flag"],
+    ["jq -n --rawfile body x.txt .", "guard:file-read-flag"],
+    ["jq --from-file x.json .", "guard:file-read-flag"],
+    ["jq -f prog.jq .", "guard:jq-program-file"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    // `grep -f` only loads patterns, so the decision stays with the allowlist.
+    assert.equal(await verdict(harness, ["grep -f patterns.txt src"]), "allow");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("git reads that execute a configured program ask", async () => {
+  const harness = await start();
+  const commands = ["git diff --ext-diff", "git log --textconv", "git show --ext-diff", "git diff --textconv"];
+
+  try {
+    for (const command of commands) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], "guard:git-external-command", command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("hard-ask sees through env prefixes, wrappers and git global flags", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [ReadonlyArray<string>, string]> = [
+    [["git -C /tmp push"], "git-push"],
+    [["git --no-pager push"], "git-push"],
+    [["git -c k=v push"], "git-push"],
+    [["git --git-dir=/tmp/repo push"], "git-push"],
+    [["env sudo"], "sudo"],
+    [["FOO=1 sudo"], "sudo"],
+    [["nohup sudo"], "sudo"],
+    [["command sudo"], "sudo"],
+    [["time sudo"], "sudo"],
+    [["\\sudo ls"], "sudo"],
+    [["doas ls"], "sudo"],
+    [["sudoedit /etc/hosts"], "sudo"],
+    [["npm ci"], "npm-install"],
+    [["npm --prefix . install"], "npm-install"],
+    [["yarn"], "npm-install"],
+    [["pnpm"], "npm-install"],
+    [["python -m pip install x"], "pip-install"],
+    [["python3 -m pip install x"], "pip-install"],
+    [["uv sync"], "uv-install"],
+    [["cargo install ripgrep"], "cargo-install"],
+    [["brew upgrade jq"], "brew-install"],
+  ];
+
+  try {
+    for (const [resources, rule] of cases) {
+      const input = evaluation({ resources });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${resources.join(" ")} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual({ source: entry?.["source"], rule: entry?.["rule"] }, { source: "hard-ask", rule });
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("rm through an unexpanded variable still asks", async () => {
+  const harness = await start();
+  try {
+    assert.equal(await verdict(harness, ["rm -rf $HOME/x"]), "ask");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("enabled: false with log_raw writes neither raw nor audit files", async () => {
+  const harness = await start({ enabled: false, log_raw: true });
+  try {
+    assert.equal(harness.hookRegistered, false);
+    assert.equal(existsSync(join(harness.root, "state")), false);
+    assert.equal(existsSync(join(harness.root, "audit")), false);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("log_raw records non-shell and compound events verbatim", async () => {
+  const harness = await start({ log_raw: true });
+  try {
+    await harness.evaluate(evaluation({ action: "read", resources: ["src/index.ts"] }));
+    assert.deepEqual(harness.auditEntries(), []);
+
+    await harness.evaluate(evaluation({ resources: ["git status", "cat .env"] }));
+
+    const lines = readFileSync(harness.logFile, "utf8")
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(lines.length, 2);
+    assert.deepEqual(lines[0], { sessionID: "ses_test", action: "read", resources: ["src/index.ts"], effect: "ask" });
+    assert.equal(lines[1]?.["action"], "shell");
+    assert.deepEqual(lines[1]?.["resources"], ["git status", "cat .env"]);
+  } finally {
+    harness.dispose();
+  }
+});
