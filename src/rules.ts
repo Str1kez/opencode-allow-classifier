@@ -113,6 +113,8 @@ export type GuardRule =
   | { readonly name: string; readonly kind: "substring"; readonly value: string; readonly program?: string }
   | { readonly name: string; readonly kind: "token"; readonly values: readonly string[]; readonly program?: string }
   | { readonly name: string; readonly kind: "short-flag"; readonly value: string; readonly program?: string }
+  /** Any token of a short cluster (`-10f`, `-1F`) contains one of the letters. */
+  | { readonly name: string; readonly kind: "short-cluster"; readonly values: readonly string[]; readonly program?: string }
   | { readonly name: string; readonly kind: "long-flag"; readonly value: string; readonly program?: string }
   | { readonly name: string; readonly kind: "metacharacter"; readonly values: readonly string[] }
   /** The program is invoked through a path outside the trusted system directories. */
@@ -204,6 +206,7 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // Git "reads" that run a program configured in `.git/config` or `.gitattributes`.
   { name: "git-external-command", kind: "long-flag", value: "--ext-diff" },
   { name: "git-external-command", kind: "long-flag", value: "--textconv" },
+  { name: "git-external-command", kind: "long-flag", value: "--show-signature" },
 
   // Flags that read a file the positional guard never sees.
   // `-f` is absent for `grep`/`rg`: it only loads patterns. `jq -f` runs a jq program that can print
@@ -217,9 +220,12 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // Commands that change state while looking like reads.
   { name: "set-clock", kind: "short-flag", value: "-s", program: "date" },
   { name: "set-clock", kind: "long-flag", value: "--set", program: "date" },
-  { name: "tail-follow", kind: "short-flag", value: "-f", program: "tail" },
-  { name: "tail-follow", kind: "short-flag", value: "-F", program: "tail" },
+  // `tail -1f`, `-10F` and `-f` all follow: the letter hides inside a numeric cluster.
+  { name: "tail-follow", kind: "short-cluster", values: ["f", "F"], program: "tail" },
   { name: "tail-follow", kind: "long-flag", value: "--follow", program: "tail" },
+  // `file -C` compiles the magic database into `magic.mgc` in the current directory.
+  { name: "file-compile", kind: "short-flag", value: "-C", program: "file" },
+  { name: "file-compile", kind: "long-flag", value: "--compile", program: "file" },
 
   // A program reached through a local or untrusted path can be a shim with a harmless basename.
   { name: "untrusted-binary", kind: "program-path" },

@@ -7,7 +7,16 @@ import {
   type GuardRule,
   type HardAskRule,
 } from "./rules.ts";
-import { isPathLike, isTrustedProgramPath, programOf, resolvesOutsideCwd, resolvesToCwd, tokenize } from "./shell.ts";
+import {
+  escapesCwd,
+  isPathLike,
+  isTrustedProgramPath,
+  programOf,
+  resolvesOutsideCwd,
+  resolvesToCwd,
+  tokenize,
+  type RealPathResolver,
+} from "./shell.ts";
 
 export type Verdict = "allow" | "ask";
 
@@ -178,11 +187,6 @@ function matchesAllowlist(rule: AllowlistRule, tokens: ReadonlyArray<string>): b
   return tokens.slice(rule.prefix.length).every((token) => rule.allowedTokens?.includes(token) === true);
 }
 
-function matchesLongFlag(token: string, value: string): boolean {
-  // Exact or `--flag=value`; `--pretty` must not look like `--pre`.
-  return token === value || token.startsWith(`${value}=`);
-}
-
 /**
  * Every shape the shell could hand to the program: the raw resource, the same text with quotes removed
  * (`cat ".en""v"` is `.env`), and the glued tokens. A guard fires when any of them matches.
@@ -193,46 +197,140 @@ function guardTexts(segment: Segment): ReadonlyArray<string> {
 
 /** `grep -r`, `-R`, `-rn`, `-d` and their long forms. */
 const GREP_RECURSIVE_SHORT = /^-[^-]*[rRd]/;
-const GREP_RECURSIVE_LONG = new Set(["--recursive", "--dereference-recursive", "--directories"]);
+const GREP_RECURSIVE_LONG: readonly string[] = ["--recursive", "--dereference-recursive", "--directories"];
+
+/**
+ * GNU getopt_long accepts any unambiguous prefix: `--recurs` and `--direct=recurse` mean the full names.
+ * Comparing exactly is a one-letter bypass of every long-flag guard, so all of them go through here.
+ */
+function longFlagName(token: string): string | undefined {
+  if (!token.startsWith("--") || token.length <= 2) return undefined;
+  return token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+}
+
+function matchesLongFlagPrefix(token: string, canonicals: ReadonlyArray<string>): boolean {
+  const name = longFlagName(token);
+  return name !== undefined && canonicals.some((canonical) => canonical.startsWith(name));
+}
+
+/** Grep flags whose next token is a value, never a search root. */
+const GREP_VALUE_FLAGS = new Set([
+  "-e",
+  "-f",
+  "-m",
+  "-A",
+  "-B",
+  "-C",
+  "-d",
+  "--regexp",
+  "--file",
+  "--max-count",
+  "--after-context",
+  "--before-context",
+  "--context",
+  "--include",
+  "--exclude",
+  "--exclude-dir",
+  "--directories",
+  "--devices",
+  "--binary-files",
+  "--label",
+]);
+
+/** True for `-e PATTERN` and its glued forms `-re PATTERN` / `-ePATTERN`. */
+function takesPatternFromArgs(token: string): boolean {
+  if (token.startsWith("--")) return matchesLongFlagPrefix(token, ["--regexp", "--file"]);
+  return /^-[^-]*[ef]/.test(token);
+}
+
+function positionalOperands(args: ReadonlyArray<string>): string[] {
+  const operands: string[] = [];
+  let skipNext = false;
+  let optionsEnded = false;
+
+  for (const token of args) {
+    if (skipNext) {
+      skipNext = false;
+      continue;
+    }
+    if (!optionsEnded && token === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && token.startsWith("-") && token !== "-") {
+      const name = longFlagName(token) ?? token;
+      skipNext = token.includes("=") ? false : GREP_VALUE_FLAGS.has(name) || takesPatternFromArgs(token);
+      continue;
+    }
+    operands.push(token);
+  }
+
+  return operands;
+}
 
 /**
  * `rg` flags that stop it from skipping hidden files, ignore files or binary files. Plain `rg` is a
  * different command: `-u`/`--no-ignore*` and friends make it read `.env` without naming it.
  */
-const RG_UNRESTRICTED_LONG = new Set(["--unrestricted", "--hidden", "--binary", "--text", "--follow"]);
+const RG_UNRESTRICTED_LONG: readonly string[] = ["--unrestricted", "--hidden", "--binary", "--text", "--follow"];
 
 function hasRgUnrestrictedFlag(tokens: ReadonlyArray<string>): boolean {
   return tokens.slice(1).some((token) => {
     if (token.startsWith("--")) {
-      const name = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
-      return RG_UNRESTRICTED_LONG.has(name) || name.startsWith("--no-ignore");
+      const name = longFlagName(token);
+      return (
+        matchesLongFlagPrefix(token, RG_UNRESTRICTED_LONG) ||
+        (name !== undefined && name.startsWith("--no-ignore"))
+      );
     }
     // Short clusters: `-u`, `-uuu`, `-a`, `-L`. `-U` (multiline) and `-A` (after-context) differ.
     return /^-[^-]*[uaL]/.test(token);
   });
 }
 
+/**
+ * A recursive grep reads files whose names never appear in argv. The root is the last positional
+ * operand, and grep defaults it to the working directory when no file operand is given at all:
+ * `grep -r TODO` dumps every file in the project, `.env` included.
+ */
 function searchesCwdRecursively(tokens: ReadonlyArray<string>, cwd: string): boolean {
   const args = tokens.slice(1);
-  const recursive = args.some((token) => {
-    if (token.startsWith("--")) {
-      const name = token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
-      return GREP_RECURSIVE_LONG.has(name);
-    }
-    return GREP_RECURSIVE_SHORT.test(token);
-  });
+  const recursive = args.some((token) =>
+    token.startsWith("--") ? matchesLongFlagPrefix(token, GREP_RECURSIVE_LONG) : GREP_RECURSIVE_SHORT.test(token),
+  );
   if (!recursive) return false;
 
-  // The root is cwd when a positional operand is `.`, `./` or the cwd path itself. A pattern of `.`
-  // is indistinguishable here and asks too; a false ask costs one keypress.
-  return args.some((token) => !token.startsWith("-") && resolvesToCwd(token, cwd));
+  const operands = positionalOperands(args);
+  if (operands.some((operand) => resolvesToCwd(operand, cwd))) return true;
+
+  // grep needs a pattern and at least one file; `-e` supplies the pattern separately.
+  const patternByFlag = args.some((token) => takesPatternFromArgs(token));
+  return operands.length < (patternByFlag ? 1 : 2);
 }
 
-function readsOutsideCwd(tokens: ReadonlyArray<string>, cwd: string): boolean {
-  return tokens.slice(1).some((token) => isPathLike(token) && resolvesOutsideCwd(token, cwd));
+/** Every path a token could name: the token itself, a `--flag=value` value and a `-fvalue` value. */
+function pathCandidates(token: string): string[] {
+  const candidates = [token];
+  const equals = token.indexOf("=");
+  if (equals > 0) candidates.push(token.slice(equals + 1));
+
+  const attached = /^-[A-Za-z](.+)$/.exec(token);
+  if (attached?.[1] !== undefined) candidates.push(attached[1]);
+  return candidates;
 }
 
-function matchesGuard(rule: GuardRule, segment: Segment, cwd: string): boolean {
+function readsOutsideCwd(tokens: ReadonlyArray<string>, cwd: string, realpath: RealPathResolver | undefined): boolean {
+  return tokens.slice(1).some((token) =>
+    pathCandidates(token).some(
+      (candidate) =>
+        (isPathLike(candidate) && resolvesOutsideCwd(candidate, cwd, realpath)) ||
+        // A bare name cannot escape lexically, but it can be a symlink to a file outside the project.
+        (realpath !== undefined && escapesCwd(candidate, cwd, realpath)),
+    ),
+  );
+}
+
+function matchesGuard(rule: GuardRule, segment: Segment, cwd: string, realpath: RealPathResolver | undefined): boolean {
   if ("program" in rule && rule.program !== undefined && programOf(segment.tokens[0]) !== rule.program) return false;
 
   switch (rule.kind) {
@@ -249,12 +347,18 @@ function matchesGuard(rule: GuardRule, segment: Segment, cwd: string): boolean {
     case "short-flag":
       // `-o out.patch` and `-oout.patch`, but not `--oneline`.
       return segment.tokens.some((token) => !token.startsWith("--") && token.startsWith(rule.value));
+    case "short-cluster":
+      // `-f`, `-1f`, `-10F`: the letter anywhere inside the cluster.
+      return segment.tokens.some(
+        (token) =>
+          !token.startsWith("--") && token.startsWith("-") && rule.values.some((value) => token.slice(1).includes(value)),
+      );
     case "long-flag":
-      return segment.tokens.some((token) => matchesLongFlag(token, rule.value));
+      return segment.tokens.some((token) => matchesLongFlagPrefix(token, [rule.value]));
     case "program-path":
       return !isTrustedProgramPath(segment.tokens[0] ?? "", TRUSTED_PROGRAM_DIRECTORIES);
     case "outside-cwd":
-      return readsOutsideCwd(segment.tokens, cwd);
+      return readsOutsideCwd(segment.tokens, cwd, realpath);
     case "unrestricted-search":
       return hasRgUnrestrictedFlag(segment.tokens);
     case "cwd-root-search":
@@ -269,8 +373,14 @@ function finish(decision: Omit<Decision, "latency">, started: number): Decision 
 /**
  * Verdict for a whole evaluation. Hard-ask anywhere wins; otherwise every resource must pass the same
  * two gates — an allowlist entry and the secret/write guard — or the whole call asks.
+ *
+ * `realpath` is only used to see through symlinks; without it the path guards compare strings.
  */
-export function decide(resources: ReadonlyArray<string>, cwd: string): Decision {
+export function decide(
+  resources: ReadonlyArray<string>,
+  cwd: string,
+  realpath?: RealPathResolver,
+): Decision {
   const started = performance.now();
   const segments: Segment[] = resources.map((text) => ({
     text,
@@ -297,7 +407,7 @@ export function decide(resources: ReadonlyArray<string>, cwd: string): Decision 
       return finish({ verdict: "ask", source: "default", rule: "no-allowlist-match", probability: null, model: null }, started);
     }
 
-    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, segment, cwd));
+    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, segment, cwd, realpath));
     if (guard !== undefined) {
       return finish(
         { verdict: "ask", source: "allowlist", rule: `guard:${guard.name}`, probability: null, model: null },

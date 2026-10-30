@@ -52,19 +52,46 @@ export function programOf(token: string | undefined): string {
   return parts[parts.length - 1] ?? "";
 }
 
+/** Resolves a filesystem path to its real location, or `undefined` when it does not exist. */
+export type RealPathResolver = (path: string) => string | undefined;
+
+/** Absolute form of a token: `~` expanded, relative paths anchored at `cwd`. */
+export function expandPath(target: string, cwd: string): string {
+  const expanded = target === "~" ? homedir() : target.startsWith("~/") ? join(homedir(), target.slice(2)) : target;
+  return resolve(cwd, expanded);
+}
+
+function isOutside(resolved: string, cwd: string): boolean {
+  const base = resolve(cwd);
+  return resolved !== base && !resolved.startsWith(base + sep);
+}
+
 /**
  * True when `target` resolves outside `cwd`. Comparison is on resolved paths, not on string prefixes:
  * `rm ./project/../x` is outside even though the raw text starts with the directory name.
+ *
+ * `realpath` closes the symlink hole: `notes -> ~/.ssh/id_rsa` is lexically inside the project, so the
+ * string comparison alone would allow reading a private key. The resolver is injected because `decide`
+ * stays pure and the tests must not depend on the real disk.
  */
-export function resolvesOutsideCwd(target: string, cwd: string): boolean {
+export function resolvesOutsideCwd(target: string, cwd: string, realpath?: RealPathResolver): boolean {
   // `~user` names another account's home, which this process cannot expand; treat it as outside.
   if (target.startsWith("~") && target !== "~" && !target.startsWith("~/")) return true;
+  return escapesCwd(target, cwd, realpath);
+}
 
-  const expanded = target === "~" ? homedir() : target.startsWith("~/") ? join(homedir(), target.slice(2)) : target;
-  const resolved = resolve(cwd, expanded);
-  const base = resolve(cwd);
+/**
+ * Same check without the `~user` shortcut, for tokens that are not path-shaped: a bare `notes` cannot
+ * escape lexically but can be a symlink to a private key.
+ */
+export function escapesCwd(target: string, cwd: string, realpath?: RealPathResolver): boolean {
+  const resolved = expandPath(target, cwd);
+  if (isOutside(resolved, cwd)) return true;
+  if (realpath === undefined) return false;
 
-  return resolved !== base && !resolved.startsWith(base + sep);
+  // The cwd is resolved too: a symlinked `/tmp` checkout would otherwise read every real path as outside.
+  const real = realpath(resolved);
+  return real !== undefined && isOutside(real, realpath(resolve(cwd)) ?? resolve(cwd));
 }
 
 /**

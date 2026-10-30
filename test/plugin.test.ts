@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -32,7 +32,7 @@ function evaluation(overrides: Partial<PermissionEvaluation> = {}): PermissionEv
 }
 
 /** Runs the plugin effect against a fake context and returns the hook callback it registered. */
-async function start(options: Record<string, unknown> = {}): Promise<Harness> {
+async function start(options: Record<string, unknown> = {}, cwd: string = CWD): Promise<Harness> {
   const root = mkdtempSync(join(tmpdir(), "allow-classifier-"));
   const logDirectory = join(root, "state");
   const auditDirectory = join(root, "audit");
@@ -40,7 +40,7 @@ async function start(options: Record<string, unknown> = {}): Promise<Harness> {
 
   const context = {
     options: { log_dir: logDirectory, audit_dir: auditDirectory, ...options },
-    location: { directory: CWD },
+    location: { directory: cwd },
     permission: {
       hook: (name: string, callback: (input: PermissionEvaluation) => Effect.Effect<void>) => {
         assert.equal(name, "evaluate");
@@ -651,6 +651,10 @@ test("reads are allowed only inside the working directory", async () => {
     ["rg -uuu -a -N . ~", "guard:outside-cwd"],
     ["grep -r . /", "guard:outside-cwd"],
     ["rg --files --hidden /", "guard:outside-cwd"],
+    // Flags that open a path the positional guard never sees: `--flag=value` and `-fvalue`.
+    ["rg --ignore-file=../../x TODO", "guard:outside-cwd"],
+    ["grep --file=../outside/patterns.txt src/a.ts", "guard:outside-cwd"],
+    ["grep -f../outside/patterns.txt src/a.ts", "guard:outside-cwd"],
   ];
 
   try {
@@ -677,6 +681,12 @@ test("recursive search cannot read secrets the path guard never sees", async () 
     ["grep -r . .", "guard:recursive-search"],
     ["grep -R TODO .", "guard:recursive-search"],
     ["grep -d recurse TODO .", "guard:recursive-search"],
+    // grep defaults the root to the working directory when no file operand is given.
+    ["grep -r '^'", "guard:recursive-search"],
+    ["grep -rn TODO", "guard:recursive-search"],
+    // getopt_long accepts unambiguous prefixes: `--recurs` is `--recursive`.
+    ["grep --recurs '^' .", "guard:recursive-search"],
+    ["grep --direct=recurse TODO .", "guard:recursive-search"],
   ];
 
   try {
@@ -714,6 +724,51 @@ test("a program reached through an untrusted path asks", async () => {
 
     assert.equal(await verdict(harness, ["/bin/cat README.md"]), "allow");
     assert.equal(await verdict(harness, ["/usr/bin/git status"]), "allow");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("a symlink pointing outside the project asks", async () => {
+  // The lexical check cannot see this: `notes` is inside the project, its target is a private key.
+  const outside = mkdtempSync(join(tmpdir(), "outside-"));
+  const project = mkdtempSync(join(tmpdir(), "project-"));
+  writeFileSync(join(outside, "id_rsa"), "secret");
+  symlinkSync(join(outside, "id_rsa"), join(project, "notes"));
+  const harness = await start({}, project);
+
+  try {
+    const input = evaluation({ resources: ["cat notes"] });
+    await harness.evaluate(input);
+    assert.equal(input.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "guard:outside-cwd");
+  } finally {
+    harness.dispose();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("state-changing look-alike flags ask", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["tail -1f README.md", "guard:tail-follow"],
+    ["tail -10F README.md", "guard:tail-follow"],
+    ["file -C", "guard:file-compile"],
+    ["git log --show-signature", "guard:git-external-command"],
+    ["ls `rm -rf /tmp/x`", "guard:shell-backtick"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    assert.equal(await verdict(harness, ["tail -n 5 README.md"]), "allow");
+    assert.equal(await verdict(harness, ["file README.md"]), "allow");
   } finally {
     harness.dispose();
   }

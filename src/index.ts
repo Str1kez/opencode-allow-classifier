@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { Plugin } from "@opencode/plugin/effect";
 import type { PermissionEvaluation } from "@opencode/plugin/effect/permission";
 import { Effect } from "effect";
@@ -8,6 +9,19 @@ import { decide } from "./policy.ts";
 import { openRawEventLog, type RawEventLog } from "./raw-log.ts";
 
 export const PLUGIN_ID = "str1kez.allow-classifier";
+
+/**
+ * Symlinks are the one escape a string comparison cannot see: `notes -> ~/.ssh/id_rsa` looks like a
+ * file inside the project. This is the only place the classifier touches the disk, and a missing path
+ * simply gets no answer — the lexical check already ran.
+ */
+function realPath(path: string): string | undefined {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return undefined;
+  }
+}
 
 function startRawEventLog(options: ClassifierOptions): RawEventLog | undefined {
   if (!options.logRaw) return undefined;
@@ -28,7 +42,7 @@ function startRawEventLog(options: ClassifierOptions): RawEventLog | undefined {
 function evaluate(evaluation: PermissionEvaluation, cwd: string, audit: AuditLog): void {
   if (evaluation.action !== "shell" || evaluation.effect !== "ask") return;
 
-  const decision = decide(evaluation.resources, cwd);
+  const decision = decide(evaluation.resources, cwd, realPath);
   if (decision.verdict === "allow") evaluation.effect = "allow";
 
   audit.write(toAuditEntry(decision, evaluation, cwd));
