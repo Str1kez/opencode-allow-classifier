@@ -9,6 +9,7 @@
     "./tui": "./src/tui.ts"
   },
   "scripts": {
+    "report": "node .opencode/skills/allow-classifier-analyze/scripts/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test"
   },
