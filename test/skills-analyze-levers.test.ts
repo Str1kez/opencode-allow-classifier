@@ -116,7 +116,7 @@ interface Report {
   skippedLines: number;
   filters: { sources: string[]; rules: string[] };
   totals: { entries: number; clusters: number };
-  clusters: Array<{ signature: string; occurrences: number }>;
+  clusters: Array<{ signature: string; occurrences: number; example: string; activeSyntax: boolean }>;
   levers: LeverSection[];
   recommendations: Recommendation[];
   observations: Observation[];
@@ -255,6 +255,157 @@ test("never recommends allowlisting around secret, outside-cwd or write guards",
 
   // The deliberately noisy metacharacter guard is the one false-positive candidate.
   assert.equal(recommended.includes('rg "a|b"'), true);
+});
+
+test("refuses every recommendation when a raw command hides active shell syntax", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    // Repro A: the newline hides a destructive second command behind the noisy metacharacter guard.
+    ...ask(["cat notes.txt\nrm -rf /tmp/x"], 3, {
+      source: "allowlist",
+      rule: "guard:shell-metacharacter",
+      probability: null,
+    }),
+    // Repro B: the same trick on a default-source command that looks like a read-only gh shape.
+    ...ask(["gh issue view <n>\nrm -rf /tmp/x"], 3, {
+      source: "default",
+      rule: "no-allowlist-match",
+      probability: null,
+    }),
+    // A hard-ask shape is just as unsafe once the raw command carries a newline.
+    ...ask(["gh pr view <n>\nrm -rf /tmp/x"], 3, {
+      source: "hard-ask",
+      rule: "gh-read-only",
+      probability: null,
+    }),
+    // Lowering the threshold would allow the whole command, not just its harmless prefix.
+    ...ask(["npm test\nrm -rf /tmp/x"], 3, { source: "model", rule: "model", probability: 0.3 }),
+    // Safe control: the same read-only shape without active syntax still gets the recommendation.
+    ...ask(["gh issue view <n>"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
+  ]);
+
+  const report = analyze(directory, audit);
+  const active = [
+    "cat notes.txt rm -rf /tmp/x",
+    "gh issue view <n> rm -rf /tmp/x",
+    "gh pr view <n> rm -rf /tmp/x",
+    "npm test rm -rf /tmp/x",
+  ];
+
+  for (const signature of active) {
+    assert.equal(report.recommendations.some((item) => item.signature === signature), false, signature);
+    const cluster = report.clusters.find((item) => item.signature === signature);
+    // The cluster flag comes from the raw resources, not from the collapsed signature.
+    assert.equal(cluster?.activeSyntax, true, signature);
+  }
+
+  // The raw newline survives into the example a human reads.
+  const hidden = report.clusters.find((item) => item.signature === "gh issue view <n> rm -rf /tmp/x");
+  assert.match(hidden?.example ?? "", /\nrm -rf \/tmp\/x$/);
+
+  const guardNote = report.observations.find((item) => item.signature === "cat notes.txt rm -rf /tmp/x")?.note ?? "";
+  assert.match(guardNote, /активный shell-синтаксис/);
+  assert.match(guardNote, /оставить/);
+
+  const defaultNote = report.observations.find((item) => item.signature === "gh issue view <n> rm -rf /tmp/x")?.note ?? "";
+  assert.match(defaultNote, /активный shell-синтаксис/);
+
+  const control = report.clusters.find((item) => item.signature === "gh issue view <n>");
+  assert.equal(control?.activeSyntax, false);
+  assert.equal(
+    report.recommendations.some((item) => item.signature === "gh issue view <n>" && item.kind === "allowlist-expansion"),
+    true,
+  );
+});
+
+test("keeps the quoted-metacharacter false positive actionable", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    ...ask(['echo "a;b"'], 3, { source: "allowlist", rule: "guard:shell-metacharacter", probability: null }),
+  ]);
+
+  const report = analyze(directory, audit);
+  const cluster = report.clusters.find((item) => item.signature === 'echo "a;b"');
+  assert.equal(cluster?.activeSyntax, false);
+
+  const recommendation = report.recommendations.find((item) => item.signature === 'echo "a;b"');
+  assert.equal(recommendation?.kind, "allowlist-expansion");
+});
+
+test("never recommends allowlisting a read-only shape that can print secrets", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    ...ask(["kubectl get secrets -o yaml"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
+    ...ask(["docker inspect app"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
+    ...ask(["kubectl logs app"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
+    // Shapes that cannot dump credentials still get the allowlist recommendation.
+    ...ask(["gh issue view <n>"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
+    ...ask(["docker ps"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
+  ]);
+
+  const report = analyze(directory, audit);
+  const recommended = report.recommendations.map((item) => item.signature);
+
+  for (const signature of ["kubectl get secrets -o yaml", "docker inspect app", "kubectl logs app"]) {
+    assert.equal(recommended.includes(signature), false, `${signature} can print secrets`);
+    const observation = report.observations.find((item) => item.signature === signature);
+    assert.match(observation?.note ?? "", /read-only не подтверждён/);
+  }
+
+  assert.equal(recommended.includes("gh issue view <n>"), true);
+  assert.equal(recommended.includes("docker ps"), true);
+});
+
+test("reads the configured threshold even when the entry has no audit_dir", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "config.jsonc");
+  writeFileSync(
+    config,
+    `{ "plugins": [{ "package": "/checkouts/opencode-allow-classifier", "options": { "threshold": 0.5 } }] }`,
+  );
+
+  const high = join(directory, "high");
+  writeLines(high, "evaluate-2026-10.jsonl", ask(["npm test"], 3, { source: "model", rule: "model", probability: 0.6 }));
+  const low = join(directory, "low");
+  writeLines(low, "evaluate-2026-10.jsonl", ask(["npm test"], 3, { source: "model", rule: "model", probability: 0.4 }));
+
+  const highJson = run(["--config", config, "--audit-dir", high, "--since", "2000-01-01", "--json"], {
+    cwd: directory,
+  });
+  assert.equal(highJson.status, 0, highJson.stderr);
+  // Max 0.6 is above the effective 0.5 threshold: lowering it would change nothing.
+  assert.deepEqual(parseReport(highJson).recommendations, []);
+
+  const highText = run(["--config", config, "--audit-dir", high, "--since", "2000-01-01"], { cwd: directory });
+  assert.equal(highText.status, 0, highText.stderr);
+  assert.match(highText.stdout, /порог[а-я]* 0\.5/);
+
+  const lowJson = run(["--config", config, "--audit-dir", low, "--since", "2000-01-01", "--json"], {
+    cwd: directory,
+  });
+  assert.equal(lowJson.status, 0, lowJson.stderr);
+  assert.deepEqual(
+    parseReport(lowJson).recommendations.map((item) => item.kind),
+    ["threshold-lowering"],
+  );
+
+  const lowText = run(["--config", config, "--audit-dir", low, "--since", "2000-01-01"], { cwd: directory });
+  assert.equal(lowText.status, 0, lowText.stderr);
+  assert.match(lowText.stdout, /порог[а-я]* 0\.5/);
+
+  // The same threshold is found through project discovery when only --audit-dir is passed.
+  const project = join(directory, "project");
+  mkdirSync(project);
+  writeFileSync(
+    join(project, "opencode.jsonc"),
+    `{ "plugins": [{ "package": "/checkouts/opencode-allow-classifier", "options": { "threshold": 0.5 } }] }`,
+  );
+  const discovered = run(["--audit-dir", high, "--since", "2000-01-01", "--json"], { cwd: project });
+  assert.equal(discovered.status, 0, discovered.stderr);
+  assert.deepEqual(parseReport(discovered).recommendations, []);
 });
 
 test("puts classifier errors in their own lever and never turns them into allowlist advice", (t) => {

@@ -7,7 +7,7 @@
  * the same clusters produce the same bytes.
  */
 import { SAFETY_THRESHOLD } from "../src/classifier.ts";
-import { programOf, shellActiveText, tokenize } from "../src/shell.ts";
+import { hasActiveShellSyntax, programOf, tokenize } from "../src/shell.ts";
 import type { ClusterReport } from "./report.ts";
 
 export const LEVERS = ["allowlist-and-guards", "model-and-threshold", "hard-ask", "classifier-errors"] as const;
@@ -106,6 +106,10 @@ const FALSE_POSITIVE_GUARDS: ReadonlySet<string> = new Set(["shell-metacharacter
  * Shapes the analyzer is willing to call read-only without a matching allowlist rule. Deliberately
  * narrow and scoped to a program plus subcommand: a program name alone is not evidence (`gh` can
  * create issues, `docker` can run containers). Everything not listed here stays an observation.
+ *
+ * `kubectl get`/`describe`/`logs` and `docker logs`/`inspect` are intentionally absent: their output
+ * can contain credentials (`kubectl get secrets -o yaml`, container env and mounted files), so
+ * recommending an allowlist rule for them is not safe even though the call itself writes nothing.
  */
 const READ_ONLY_SHAPES: readonly (readonly string[])[] = [
   ["gh", "issue", "view"],
@@ -121,13 +125,8 @@ const READ_ONLY_SHAPES: readonly (readonly string[])[] = [
   ["gh", "release", "list"],
   ["docker", "ps"],
   ["docker", "images"],
-  ["docker", "logs"],
-  ["docker", "inspect"],
   ["docker", "version"],
   ["docker", "info"],
-  ["kubectl", "get"],
-  ["kubectl", "describe"],
-  ["kubectl", "logs"],
   ["kubectl", "version"],
   ["git", "ls-files"],
   ["git", "describe"],
@@ -159,6 +158,10 @@ const RECOMMENDATION_RANK: Readonly<Record<RecommendationKind, number>> = {
   "hard-ask-exception": 1,
   "threshold-lowering": 2,
 };
+
+/** Read-only says "does not mutate", not "cannot leak"; every allowlist recommendation says so. */
+const READ_ONLY_RISK =
+  "read-only команда всё равно может напечатать секреты; добавляй точную форму, только если такой вывод допустим.";
 
 /**
  * Mixed clusters pick one lever by this order: an operational error first (never read as policy
@@ -265,6 +268,9 @@ function recommendationFor(
   threshold: number,
 ): Recommendation | undefined {
   if (cluster.occurrences < EVIDENCE_THRESHOLD) return undefined;
+  // Active syntax is the same blocker for every lever: an allowlist, a hard-ask exception or a lower
+  // threshold would all let the hidden second command through.
+  if (cluster.activeSyntax) return undefined;
 
   switch (lever) {
     case "allowlist-and-guards":
@@ -295,8 +301,7 @@ function allowlistRecommendation(cluster: ClusterReport): Recommendation | undef
       occurrences: cluster.occurrences,
       example: cluster.example,
       newAllows: [cluster.signature],
-      risk:
-        "Риск: расширение гарда на этот shape пропустит активный метасимвол, если кавычки в команде не литеральные.",
+      risk: `Риск: расширение гарда на этот shape пропустит активный метасимвол, если кавычки в команде не литеральные. ${READ_ONLY_RISK}`,
       why: `Команда уже входит в read-only allowlist; ask вызывает только гард ${guards.join(",")}. Правка должна быть узкой: только этот shape.`,
     };
   }
@@ -310,8 +315,7 @@ function allowlistRecommendation(cluster: ClusterReport): Recommendation | undef
       occurrences: cluster.occurrences,
       example: cluster.example,
       newAllows: [cluster.signature],
-      risk:
-        `Риск: если форма окажется не read-only, новое правило станет обходом записи; добавляй узкий префикс "${cluster.signature}", а не программу целиком.`,
+      risk: `Риск: если форма окажется не read-only, новое правило станет обходом записи; добавляй узкий префикс "${cluster.signature}", а не программу целиком. ${READ_ONLY_RISK}`,
       why: "Форма входит в консервативный список read-only команд, но правила для неё нет. Расширение allowlist безопаснее правки порога.",
     };
   }
@@ -368,6 +372,9 @@ function noteFor(cluster: ClusterReport, lever: Lever, threshold: number): strin
       return `ошибка классификатора (${clusterRules(cluster).join(",") || "-"}): отдельная секция, политику не менять`;
     case "hard-ask": {
       const rules = clusterRules(cluster);
+      if (cluster.activeSyntax) {
+        return `hard-ask ${rules.join(",")}: команда содержит активный shell-синтаксис — правило оставить`;
+      }
       if (rules.some(isForbiddenHardAsk)) {
         return `hard-ask ${rules.join(",")}: оставить — исключение не рекомендуется`;
       }
@@ -376,6 +383,10 @@ function noteFor(cluster: ClusterReport, lever: Lever, threshold: number): strin
     }
     case "allowlist-and-guards": {
       const guards = guardNames(cluster);
+      if (cluster.activeSyntax) {
+        const subject = guards.length > 0 ? `гард ${guards.join(",")} оставить` : "правило не предлагается";
+        return `команда содержит активный shell-синтаксис: read-only не подтверждён, ${subject}`;
+      }
       if (guards.some(isDenyLikeGuard)) {
         return `гард ${guards.join(",")}: оставить, прав разрешения не менять`;
       }
@@ -391,6 +402,9 @@ function noteFor(cluster: ClusterReport, lever: Lever, threshold: number): strin
       return "нет совпадения с allowlist, read-only не подтверждён — правило не предлагается";
     }
     case "model-and-threshold": {
+      if (cluster.activeSyntax) {
+        return "команда содержит активный shell-синтаксис: понижение порога не рекомендуется";
+      }
       const probability = cluster.probability;
       if (probability === null) return "нет вероятности модели — порог не рычаг";
       if (probability.max >= threshold) {
@@ -433,7 +447,7 @@ function isForbiddenHardAsk(rule: string): boolean {
 
 /** Program plus subcommand match; the raw example is tokenized with the plugin's own tokenizer. */
 function isReadOnlyShape(example: string): boolean {
-  if (/[;&|`$(){}<>\\!*?\[\]\n]/.test(shellActiveText(example))) return false;
+  if (hasActiveShellSyntax(example)) return false;
   const tokens = tokenize(example);
   for (const shape of READ_ONLY_SHAPES) {
     if (tokens.length < shape.length) continue;

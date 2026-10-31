@@ -9,6 +9,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { AuditEntry } from "../src/audit.ts";
+import { hasActiveShellSyntax } from "../src/shell.ts";
 import {
   buildLeverReport,
   type ClassifierErrorReport,
@@ -58,6 +59,8 @@ export interface ClusterReport {
   readonly projects: number;
   readonly agents: number;
   readonly example: string;
+  /** True when any raw resource in the cluster kept shell syntax after quotes are blanked. */
+  readonly activeSyntax: boolean;
 }
 
 export interface AskReport {
@@ -124,21 +127,23 @@ export function parseSince(raw: string, now: Date = new Date()): AnalysisWindow 
 }
 
 /**
- * The human-readable command: resources joined and whitespace collapsed, with numbers and hashes
- * left exactly as the user typed them. This is what the report shows as the example; the normalized
- * clustering key is `commandSignature`.
+ * The human-readable command: resources joined, whitespace left as typed, with numbers and hashes
+ * untouched. This is what the report shows as the example, so a newline that hides a second command
+ * stays visible instead of collapsing into a harmless-looking one-liner. The normalized clustering
+ * key is `commandSignature`.
  */
 export function rawCommand(resources: readonly string[]): string {
-  return resources.join(" ; ").replace(/\s+/g, " ").trim();
+  return resources.join(" ; ").trim();
 }
 
 /**
- * Clustering key. Numbers become `<n>` and long hex tokens become `<hex>`, so repeated commands with
- * different issue numbers, line counts and commit hashes land in one cluster. Paths and quoted text
- * stay as-is: the ticket only asks for numeric and hex normalization.
+ * Clustering key. Whitespace collapses, numbers become `<n>` and long hex tokens become `<hex>`, so
+ * repeated commands with different issue numbers, line counts and commit hashes land in one cluster.
+ * Paths and quoted text stay as-is: the ticket only asks for numeric and hex normalization. The
+ * collapsed key is safe because the raw `activeSyntax` flag is computed separately, per cluster.
  */
 export function commandSignature(resources: readonly string[]): string {
-  const command = rawCommand(resources);
+  const command = rawCommand(resources).replace(/\s+/g, " ").trim();
   if (command.length === 0) return EMPTY_SIGNATURE;
   return command.replace(LONG_HEX_TOKEN, "<hex>").replace(/\d+/g, "<n>");
 }
@@ -184,6 +189,7 @@ export function clusterEntries(entries: readonly AuditEntry[]): ClusterReport[] 
         projects: new Set(),
         agents: new Set(),
         examples: new Set(),
+        activeSyntax: false,
       };
       clusters.set(signature, cluster);
     }
@@ -196,7 +202,11 @@ export function clusterEntries(entries: readonly AuditEntry[]): ClusterReport[] 
     increment(cluster.rules, entry.rule);
     cluster.projects.add(entry.cwd);
     if (entry.agent !== null && entry.agent !== undefined) cluster.agents.add(entry.agent);
-    cluster.examples.add(rawCommand(entry.resources));
+    const raw = rawCommand(entry.resources);
+    cluster.examples.add(raw);
+    // The flag covers every entry, so a mixed cluster stays unsafe even when its displayed example
+    // happens to be the clean one.
+    cluster.activeSyntax ||= hasActiveShellSyntax(raw);
   }
 
   return [...clusters.values()]
@@ -213,6 +223,7 @@ interface MutableCluster {
   readonly projects: Set<string>;
   readonly agents: Set<string>;
   readonly examples: Set<string>;
+  activeSyntax: boolean;
 }
 
 function finishCluster(cluster: MutableCluster): ClusterReport {
@@ -228,6 +239,7 @@ function finishCluster(cluster: MutableCluster): ClusterReport {
     projects: cluster.projects.size,
     agents: cluster.agents.size,
     example,
+    activeSyntax: cluster.activeSyntax,
   };
 }
 

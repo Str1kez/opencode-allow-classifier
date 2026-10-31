@@ -166,6 +166,17 @@ export function shellActiveText(raw: string): string {
 }
 
 /**
+ * Characters a shell would act on after quotes and escapes are blanked, plus the pattern syntax that
+ * makes an allowlist prefix unsafe. A quoted metacharacter is literal and does not count.
+ */
+const ACTIVE_SHELL_CHARACTERS = /[;&|`$(){}<>\\!*?\[\]\n]/;
+
+/** True when the raw text still contains shell syntax a read-only rule must not accept. */
+export function hasActiveShellSyntax(raw: string): boolean {
+  return ACTIVE_SHELL_CHARACTERS.test(shellActiveText(raw));
+}
+
+/**
  * A program invoked through a path (`./cat`, `/tmp/evil/git`) is only provably the program it claims
  * to be when it lives in a system directory. Bare names are left to `PATH` without an I/O lookup.
  */

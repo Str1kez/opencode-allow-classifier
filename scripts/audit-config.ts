@@ -25,7 +25,10 @@ export class ConfigError extends Error {
 export interface AuditDirectoryResolution {
   readonly directory: string;
   readonly configPath: string | null;
-  /** Effective threshold from the same plugin entry that supplied `audit_dir`, when one was read. */
+  /**
+   * Effective threshold from the classifier plugin entry, when one was read. Independent of
+   * `audit_dir`: a config may tune the threshold without moving the audit directory.
+   */
   readonly threshold: number | undefined;
   readonly warnings: readonly string[];
 }
@@ -39,12 +42,17 @@ export interface ResolveAuditDirectoryOptions {
 
 export function resolveAuditDirectory(options: ResolveAuditDirectoryOptions): AuditDirectoryResolution {
   if (options.explicitAuditDir !== undefined) {
-    return {
-      directory: resolve(options.cwd, options.explicitAuditDir),
-      configPath: null,
-      threshold: undefined,
-      warnings: [],
-    };
+    const directory = resolve(options.cwd, options.explicitAuditDir);
+
+    // The flag overrides where the audit lives, not which threshold the plugin runs with.
+    if (options.explicitConfig !== undefined) {
+      const path = resolve(options.cwd, options.explicitConfig);
+      if (!existsSync(path)) throw new ConfigError(`config not found: ${path}`);
+      return { directory, configPath: null, threshold: readClassifierConfig(path)?.threshold, warnings: [] };
+    }
+
+    const discovered = discoverThreshold(options);
+    return { directory, configPath: null, threshold: discovered.threshold, warnings: discovered.warnings };
   }
 
   if (options.explicitConfig !== undefined) {
@@ -64,33 +72,66 @@ export function resolveAuditDirectory(options: ResolveAuditDirectoryOptions): Au
 
   const warnings: string[] = [];
   const projectConfig = projectConfigPath(options.cwd);
+  const project = projectConfig === undefined ? undefined : tryReadClassifierConfig(projectConfig, warnings);
+
+  if (projectConfig !== undefined && project?.auditDirectory !== undefined) {
+    return {
+      directory: resolve(options.cwd, project.auditDirectory),
+      configPath: projectConfig,
+      threshold: project.threshold,
+      warnings,
+    };
+  }
+
+  const globalConfig = globalConfigPath(options.env);
+  const global =
+    globalConfig !== undefined && globalConfig !== projectConfig
+      ? tryReadClassifierConfig(globalConfig, warnings)
+      : undefined;
+
+  if (globalConfig !== undefined && global?.auditDirectory !== undefined) {
+    return {
+      directory: resolve(options.cwd, global.auditDirectory),
+      configPath: globalConfig,
+      // A project entry without `audit_dir` still wins on the threshold: it is the effective config.
+      threshold: project?.threshold ?? global.threshold,
+      warnings,
+    };
+  }
+
+  return {
+    directory: openCodeStateDirectory(options.env),
+    configPath: null,
+    threshold: project?.threshold ?? global?.threshold,
+    warnings,
+  };
+}
+
+interface DiscoveredThreshold {
+  readonly threshold: number | undefined;
+  readonly warnings: string[];
+}
+
+/**
+ * Finds the effective threshold on its own. `--audit-dir` only overrides the directory, so the
+ * threshold still comes from the project or global config; an explicit `--config` is read by the caller.
+ */
+function discoverThreshold(options: ResolveAuditDirectoryOptions): DiscoveredThreshold {
+  const warnings: string[] = [];
+  const projectConfig = projectConfigPath(options.cwd);
 
   if (projectConfig !== undefined) {
     const config = tryReadClassifierConfig(projectConfig, warnings);
-    if (config?.auditDirectory !== undefined) {
-      return {
-        directory: resolve(options.cwd, config.auditDirectory),
-        configPath: projectConfig,
-        threshold: config.threshold,
-        warnings,
-      };
-    }
+    if (config?.threshold !== undefined) return { threshold: config.threshold, warnings };
   }
 
   const globalConfig = globalConfigPath(options.env);
   if (globalConfig !== undefined && globalConfig !== projectConfig) {
     const config = tryReadClassifierConfig(globalConfig, warnings);
-    if (config?.auditDirectory !== undefined) {
-      return {
-        directory: resolve(options.cwd, config.auditDirectory),
-        configPath: globalConfig,
-        threshold: config.threshold,
-        warnings,
-      };
-    }
+    if (config?.threshold !== undefined) return { threshold: config.threshold, warnings };
   }
 
-  return { directory: openCodeStateDirectory(options.env), configPath: null, threshold: undefined, warnings };
+  return { threshold: undefined, warnings };
 }
 
 export interface ClassifierConfig {
@@ -101,7 +142,8 @@ export interface ClassifierConfig {
 /**
  * Reads the plugin entry once so `audit_dir` and `threshold` come from the same options object.
  * The plugin's own option reader validates both values, so an invalid one falls back to the default
- * exactly as it does at runtime.
+ * exactly as it does at runtime. The two options are independent: an entry without `audit_dir` still
+ * defines the effective threshold.
  */
 export function readClassifierConfig(path: string): ClassifierConfig | undefined {
   let text: string;
@@ -187,7 +229,7 @@ function classifierConfigOf(value: unknown): ClassifierConfig | undefined {
     if (!isRecord(options)) continue;
 
     const parsed = readOptions(options);
-    if (parsed.auditDirectory === undefined) continue;
+    if (parsed.auditDirectory === undefined && parsed.threshold === undefined) continue;
     const config: ClassifierConfig = {
       auditDirectory: parsed.auditDirectory,
       threshold: parsed.threshold,

@@ -71,6 +71,7 @@ interface Cluster {
   projects: number;
   agents: number;
   example: string;
+  activeSyntax: boolean;
 }
 
 interface Report {
@@ -149,6 +150,7 @@ test("report clusters ask entries across monthly files by normalized signature",
     projects: 2,
     agents: 2,
     example: "gh issue view 42",
+    activeSyntax: false,
   });
 
   assert.deepEqual(report.clusters[1], {
@@ -160,6 +162,7 @@ test("report clusters ask entries across monthly files by normalized signature",
     projects: 1,
     agents: 1,
     example: "git show abc12345",
+    activeSyntax: false,
   });
 
   assert.deepEqual(report.clusters[2], {
@@ -171,6 +174,7 @@ test("report clusters ask entries across monthly files by normalized signature",
     projects: 1,
     agents: 0,
     example: "ls -la",
+    activeSyntax: false,
   });
 });
 
@@ -407,6 +411,7 @@ test("report text and JSON are stable and keep the documented field order", (t) 
     "projects",
     "agents",
     "example",
+    "activeSyntax",
   ]);
 
   const textArgs = ["--audit-dir", audit, "--since", "2000-01-01"];
