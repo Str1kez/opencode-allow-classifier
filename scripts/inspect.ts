@@ -1,6 +1,10 @@
 import { findDuplicateKeys, lastMember, parseJsonc } from "./jsonc.ts";
-import type { JsoncNode, JsoncObjectNode } from "./jsonc.ts";
+import type { JsoncNode, JsoncObjectNode, JsoncScalarNode } from "./jsonc.ts";
 import { CATCH_ALL_RULE, DENY_RULES } from "./layout.ts";
+
+type JsoncStringNode = JsoncScalarNode & { readonly type: "string"; readonly value: string };
+
+const PACKAGE_NAME = "@str1kez/opencode-allow-classifier";
 
 export interface RuleReport {
   readonly index: number;
@@ -18,11 +22,11 @@ export interface OptionsReport {
 
 export interface PluginReport {
   readonly present: boolean;
-  readonly type: "object" | "string" | "other" | "missing";
+  readonly type: "object" | "string" | "missing";
   readonly package: string | null;
   readonly packageMatches: boolean;
   readonly options: OptionsReport;
-  readonly killSwitch: "enabled" | "disabled";
+  readonly killSwitch: "enabled" | "disabled" | "unknown";
   readonly enabled: boolean | null;
 }
 
@@ -216,45 +220,27 @@ function readPlugin(root: JsoncObjectNode, packageRoot: string, warnings: string
   }
 
   const entries = member.value.items;
-  const matching = entries.find(
-    (entry): entry is JsoncObjectNode => entry.type === "object" && readString(entry, "package") === packageRoot,
-  );
-  const entry = matching ?? entries[0]!;
+  const entry = entries.find((item) => referencesPackage(item, packageRoot));
+
+  if (entry === undefined) {
+    warnings.push(`plugin entry for ${packageRoot} is not found`);
+    return missingPlugin();
+  }
 
   if (entry.type === "string") {
     warnings.push(`plugin entry is a string; options cannot be passed`);
     return {
       present: true,
       type: "string",
-      package: null,
-      packageMatches: false,
+      package: entry.value,
+      packageMatches: true,
       options: { present: false, type: "missing" },
-      killSwitch: "enabled",
-      enabled: null,
-    };
-  }
-
-  if (entry.type !== "object") {
-    warnings.push(`plugin entry is not an object`);
-    return {
-      present: true,
-      type: "other",
-      package: null,
-      packageMatches: false,
-      options: { present: false, type: "missing" },
-      killSwitch: "enabled",
+      killSwitch: "unknown",
       enabled: null,
     };
   }
 
   const packageName = readString(entry, "package");
-  const packageMatches = packageName === packageRoot;
-  if (packageName === null) {
-    warnings.push(`plugin entry has no string "package"`);
-  } else if (!packageMatches) {
-    warnings.push(`plugin entry for ${packageRoot} is not found (found ${packageName})`);
-  }
-
   const optionsMember = lastMember(entry, "options");
   const optionsPresent = optionsMember !== undefined;
   const optionsType: OptionsReport["type"] =
@@ -267,17 +253,29 @@ function readPlugin(root: JsoncObjectNode, packageRoot: string, warnings: string
   }
 
   const enabled = readEnabled(optionsMember?.value.type === "object" ? optionsMember.value : null, warnings);
-  const killSwitch = enabled === false ? "disabled" : "enabled";
+  const killSwitch = enabled === null ? "unknown" : enabled ? "enabled" : "disabled";
 
   return {
     present: true,
     type: "object",
     package: packageName,
-    packageMatches,
+    packageMatches: true,
     options: { present: optionsPresent, type: optionsType },
     killSwitch,
     enabled,
   };
+}
+
+function referencesPackage(entry: JsoncNode, packageRoot: string): entry is JsoncObjectNode | JsoncStringNode {
+  if (entry.type === "string") return isPackageReference(entry.value as string, packageRoot);
+  if (entry.type !== "object") return false;
+
+  const packageName = readString(entry, "package");
+  return packageName !== null && isPackageReference(packageName, packageRoot);
+}
+
+function isPackageReference(value: string, packageRoot: string): boolean {
+  return value === packageRoot || value === PACKAGE_NAME;
 }
 
 function readEnabled(options: JsoncObjectNode | null, warnings: string[]): boolean | null {
@@ -304,7 +302,7 @@ function missingPlugin(): PluginReport {
     package: null,
     packageMatches: false,
     options: { present: false, type: "missing" },
-    killSwitch: "enabled",
+    killSwitch: "unknown",
     enabled: null,
   };
 }
