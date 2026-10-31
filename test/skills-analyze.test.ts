@@ -298,6 +298,31 @@ test("report takes audit_dir from --config, project discovery, global config, or
   assert.equal(parseReport(fromProject).auditDir, projectAudit);
   assert.equal(parseReport(fromProject).configPath, join(projectRoot, "opencode.jsonc"));
 
+  const nestedRoot = join(directory, "nested");
+  const nestedAudit = join(nestedRoot, "logs");
+  writeLines(nestedAudit, "evaluate-2026-10.jsonl", [auditEntry({ resources: ["nested command"] })]);
+  mkdirSync(join(nestedRoot, ".opencode"), { recursive: true });
+  writeFileSync(
+    join(nestedRoot, ".opencode", "opencode.jsonc"),
+    `{ "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "audit_dir": "logs" } }] }`,
+  );
+  const fromNested = run(["--json"], { cwd: nestedRoot });
+  assert.equal(fromNested.status, 0, fromNested.stderr);
+  assert.equal(parseReport(fromNested).auditDir, nestedAudit);
+  assert.equal(parseReport(fromNested).configPath, join(nestedRoot, ".opencode", "opencode.jsonc"));
+
+  // A direct config in the project root wins over the one inside `.opencode`.
+  const directAudit = join(directory, "direct-audit");
+  writeLines(directAudit, "evaluate-2026-10.jsonl", [auditEntry({ resources: ["direct command"] })]);
+  writeFileSync(
+    join(nestedRoot, "opencode.jsonc"),
+    `{ "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "audit_dir": ${JSON.stringify(directAudit)} } }] }`,
+  );
+  const fromDirect = run(["--json"], { cwd: nestedRoot });
+  assert.equal(fromDirect.status, 0, fromDirect.stderr);
+  assert.equal(parseReport(fromDirect).auditDir, directAudit);
+  assert.equal(parseReport(fromDirect).configPath, join(nestedRoot, "opencode.jsonc"));
+
   const flagWins = run(["--config", config, "--audit-dir", flagAudit, "--json"], { cwd: directory });
   assert.equal(flagWins.status, 0, flagWins.stderr);
   assert.equal(parseReport(flagWins).auditDir, flagAudit);
@@ -322,6 +347,23 @@ test("report takes audit_dir from --config, project discovery, global config, or
   assert.equal(fromState.status, 0, fromState.stderr);
   assert.equal(parseReport(fromState).auditDir, join(directory, "state", "opencode"));
   assert.match(fromState.stderr, /audit directory not found/);
+});
+
+test("report keeps the raw command as the cluster example, not the signature", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    auditEntry({ resources: ["git log -5"] }),
+    auditEntry({ resources: ["git log -10"] }),
+  ]);
+
+  const result = run(["--audit-dir", audit, "--since", "2000-01-01", "--json"], { cwd: directory });
+  assert.equal(result.status, 0, result.stderr);
+
+  const [cluster] = parseReport(result).clusters;
+  assert.equal(cluster?.signature, "git log -<n>");
+  // "-10" sorts before "-5"; the example must show the real command, not `git log -<n>`.
+  assert.equal(cluster?.example, "git log -10");
 });
 
 test("report text and JSON are stable and keep the documented field order", (t) => {

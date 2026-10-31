@@ -105,15 +105,27 @@ function projectConfigPath(cwd: string): string | undefined {
   let directory = resolve(cwd);
 
   for (;;) {
-    for (const name of CONFIG_NAMES) {
-      const path = join(directory, name);
-      if (existsSync(path)) return path;
-    }
+    const path = configInDirectory(directory);
+    if (path !== undefined) return path;
 
     const parent = dirname(directory);
     if (parent === directory) return undefined;
     directory = parent;
   }
+}
+
+/**
+ * OpenCode looks for a project config next to the project and inside its `.opencode` directory.
+ * The direct file wins when both exist, matching the same precedence for the two file names.
+ */
+function configInDirectory(directory: string): string | undefined {
+  for (const location of ["", ".opencode"]) {
+    for (const name of CONFIG_NAMES) {
+      const path = join(directory, location, name);
+      if (existsSync(path)) return path;
+    }
+  }
+  return undefined;
 }
 
 function globalConfigPath(env: NodeJS.ProcessEnv): string | undefined {

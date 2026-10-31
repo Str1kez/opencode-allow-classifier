@@ -110,8 +110,12 @@ export function parseSince(raw: string, now: Date = new Date()): AnalysisWindow 
   throw new ReportUsageError(`invalid --since value: ${raw} (expected YYYY-MM-DD or <n>d)`);
 }
 
-/** Resources joined with a neutral separator, whitespace collapsed. Quotes are kept as the user typed them. */
-export function normalizedCommand(resources: readonly string[]): string {
+/**
+ * The human-readable command: resources joined and whitespace collapsed, with numbers and hashes
+ * left exactly as the user typed them. This is what the report shows as the example; the normalized
+ * clustering key is `commandSignature`.
+ */
+export function rawCommand(resources: readonly string[]): string {
   return resources.join(" ; ").replace(/\s+/g, " ").trim();
 }
 
@@ -121,7 +125,7 @@ export function normalizedCommand(resources: readonly string[]): string {
  * stay as-is: the ticket only asks for numeric and hex normalization.
  */
 export function commandSignature(resources: readonly string[]): string {
-  const command = normalizedCommand(resources);
+  const command = rawCommand(resources);
   if (command.length === 0) return EMPTY_SIGNATURE;
   return command.replace(LONG_HEX_TOKEN, "<hex>").replace(/\d+/g, "<n>");
 }
@@ -179,7 +183,7 @@ export function clusterEntries(entries: readonly AuditEntry[]): ClusterReport[] 
     increment(cluster.rules, entry.rule);
     cluster.projects.add(entry.cwd);
     if (entry.agent !== null && entry.agent !== undefined) cluster.agents.add(entry.agent);
-    cluster.examples.add(normalizedCommand(entry.resources));
+    cluster.examples.add(rawCommand(entry.resources));
   }
 
   return [...clusters.values()]
