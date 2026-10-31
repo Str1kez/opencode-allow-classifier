@@ -198,7 +198,9 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // Any write: `>` also covers `>>`, `2>` and `&>`.
   { name: "redirect", kind: "active-substring", value: ">" },
   { name: "tee", kind: "token", values: ["tee"] },
-  { name: "output-short-flag", kind: "short-flag", value: "-o" },
+  // `-o` is an output flag only for git. For `find` it is the OR operator, for `grep`/`rg` it means
+  // "only matching"; no allowlisted program writes through it.
+  { name: "output-short-flag", kind: "short-flag", value: "-o", program: "git" },
   { name: "output-long-flag", kind: "long-flag", value: "--output" },
 
   // Executors hidden inside "read-only" tooling.

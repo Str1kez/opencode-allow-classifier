@@ -41,4 +41,6 @@ in-memory кэш → Jev через `ctx.experimental.generate.decisions`. По�
   каталогов. Рекурсивный поиск с ignore-флагами или корнем в cwd тоже
   спрашивает: файлы, которых нет в argv, иначе обходили бы гард секретов.
 - Выбор модели живёт в TUI (`/classifier`), рантайм-оверрайд — в серверном
-  `ctx.storage`, дефолт — в `opencode.jsonc`.
+  `ctx.storage`, дефолт — в `opencode.jsonc`. Порядок резолва уточнён в
+  [ADR-0002](0002-model-config-precedence.md): опция `model` → оверрайд →
+  дефолт.

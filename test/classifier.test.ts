@@ -131,3 +131,14 @@ test("an unexpected answer shape is not retried", async () => {
   assert.equal(result.ok, false);
   assert.equal(recorderChain.calls.length, 1);
 });
+
+test("a fallback-model provider failure is not retried against itself", async () => {
+  const recorderChain = recorder(providerError("503"));
+  const result = await classify(recorderChain.ask, REQUEST, FALLBACK_MODEL);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.model, FALLBACK_MODEL);
+  assert.equal(recorderChain.calls.length, 1);
+  assert.equal(recorderChain.calls[0]?.model, FALLBACK_MODEL);
+  if (!result.ok) assert.equal(result.failure.kind, "provider");
+});

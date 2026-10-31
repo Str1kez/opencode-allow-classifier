@@ -2,17 +2,27 @@ import { realpathSync } from "node:fs";
 import { Plugin } from "@opencode/plugin/effect";
 import type { Context as PluginContext } from "@opencode/plugin/effect/plugin";
 import type { PermissionEvaluation } from "@opencode/plugin/effect/permission";
-import { Effect, Option } from "effect";
+import { Cause, Effect, Exit, Option } from "effect";
 import { openAuditLog, toAuditEntry, type AuditEntry, type AuditLog } from "./audit.ts";
 import { createVerdictCache } from "./cache.ts";
 import { normalizeTask } from "./classifier.ts";
+import { PLUGIN_ID } from "./id.ts";
 import { createGenerateAsk, type DecisionsOperation } from "./model.ts";
 import { readOptions, type ClassifierOptions } from "./options.ts";
 import { openCodeStateDirectory } from "./paths.ts";
-import { evaluate, type EvaluationInput } from "./pipeline.ts";
+import { evaluate, type CachedVerdict, type EvaluationInput } from "./pipeline.ts";
 import { openRawEventLog, type RawEventLog } from "./raw-log.ts";
+import { ClassifierRpc, type ClassifierConfig } from "./rpc.ts";
+import {
+  MAX_MODEL_LENGTH,
+  MODEL_OVERRIDE_KEY,
+  normalizeModel,
+  parseModelOverride,
+  resolveSettings,
+  type EffectiveSettings,
+} from "./settings.ts";
 
-export const PLUGIN_ID = "str1kez.allow-classifier";
+export { PLUGIN_ID } from "./id.ts";
 
 /**
  * Symlinks are the one escape a string comparison cannot see: `notes -> ~/.ssh/id_rsa` looks like a
@@ -92,6 +102,38 @@ function askModel(ctx: PluginContext): ReturnType<typeof createGenerateAsk> {
 }
 
 /**
+ * Storage has no typed error channel: a broken store surfaces as a defect. A defect here means "no
+ * override", and the config/default still decide — the picker degrades, the plugin does not.
+ */
+function readModelOverride(ctx: PluginContext): Effect.Effect<string | undefined> {
+  return Effect.map(
+    Effect.exit(Effect.suspend(() => ctx.storage.get(MODEL_OVERRIDE_KEY))),
+    (exit) => (Exit.isSuccess(exit) ? parseModelOverride(exit.value) : undefined),
+  );
+}
+
+const MAX_REASON_LENGTH = 200;
+
+/** Extracts a bounded message, not a stack trace, for the TUI toast. */
+function failureReason<A, E>(exit: Exit.Exit<A, E>): string {
+  if (Exit.isSuccess(exit)) return "unknown failure";
+  const error: unknown = Cause.squash(exit.cause);
+  const message =
+    typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  const reason = message.trim().slice(0, MAX_REASON_LENGTH);
+  return reason.length > 0 ? reason : "unknown failure";
+}
+
+/** Explicit field-by-field mapping pins the wire shape to the domain shape; drift fails the typecheck. */
+function toConfig(settings: EffectiveSettings): ClassifierConfig {
+  return { model: settings.model, threshold: settings.threshold, source: settings.source };
+}
+
+/**
  * One evaluated call. Non-shell actions and events that already have a definite effect never reach the
  * classifier and never touch the audit log; `deny` does not even reach the hook.
  */
@@ -102,11 +144,83 @@ export const ServerPlugin = Plugin.define({
       const options = readOptions(ctx.options);
       if (!options.enabled) return;
 
+      // Read once at startup and keep the resolved value in memory: `setModel` rewrites it, and the
+      // permission hook reads it per call, so a pick in the TUI applies from the next call on.
+      let settings = resolveSettings(options, yield* readModelOverride(ctx));
+      // Verdicts belong to the model that produced them and live for 30 minutes, so a model change
+      // clears this cache; without that the pick would keep answering with the old model.
+      const cache = createVerdictCache<CachedVerdict>();
+
+      yield* Effect.exit(
+        // `suspend` keeps a synchronous throw inside the effect, where `exit` catches it. RPC is a
+        // convenience for the picker; without it every command still goes through the permission hook.
+        Effect.suspend(() =>
+          ctx.rpc.register(ClassifierRpc, {
+            config: () => Effect.succeed(toConfig(settings)),
+            setModel: ({ model }, call) =>
+              Effect.gen(function* () {
+                const candidate = normalizeModel(model);
+                if (candidate === undefined) {
+                  // The caller controls `model` and it may be arbitrarily long; cap the echo so a
+                  // malformed pick cannot stuff a megabyte into the toast.
+                  const echoed = model.slice(0, MAX_MODEL_LENGTH);
+                  return yield* Effect.fail(
+                    call.error("UnknownModel", `Not a provider/model reference: ${echoed}`, { model: echoed }),
+                  );
+                }
+
+                // Chat models do not answer the `decisions` operation, so only a decision model is a
+                // valid pick even though the host can list both kinds in one catalog.
+                const catalog = yield* Effect.exit(
+                  Effect.suspend(() => ctx.model.list({ types: ["decision"] })),
+                );
+                if (Exit.isFailure(catalog)) {
+                  return yield* Effect.fail(
+                    call.error("Unavailable", "Model catalog is unavailable", { reason: failureReason(catalog) }),
+                  );
+                }
+
+                const entry = catalog.value.data.find(
+                  (info) => `${info.providerID}/${info.modelID}` === candidate,
+                );
+                if (entry === undefined) {
+                  return yield* Effect.fail(
+                    call.error("UnknownModel", `No such model in the catalog: ${candidate}`, { model: candidate }),
+                  );
+                }
+                if (entry.enabled === false) {
+                  return yield* Effect.fail(
+                    call.error("UnknownModel", `Model is unavailable in the catalog: ${candidate}`, {
+                      model: candidate,
+                    }),
+                  );
+                }
+
+                // Persist only after the catalog has accepted the id: a rejected pick must not leave a
+                // dead model behind that the next server start would try to use.
+                const saved = yield* Effect.exit(
+                  Effect.suspend(() => ctx.storage.set(MODEL_OVERRIDE_KEY, { model: candidate })),
+                );
+                if (Exit.isFailure(saved)) {
+                  return yield* Effect.fail(
+                    call.error("Unavailable", "Cannot save the model override", { reason: failureReason(saved) }),
+                  );
+                }
+
+                // The override is stored even when `options.model` shadows it: the chosen semantics keep
+                // the user's last pick for the moment the config stops pinning the model.
+                settings = resolveSettings(options, candidate);
+                cache.clear();
+                return toConfig(settings);
+              }),
+          }),
+        ),
+      );
+
       const rawLog = startRawEventLog(options);
       const audit = openAuditLog(options.auditDirectory ?? openCodeStateDirectory());
       const writeAudit = createAuditWriter(audit);
       const cwd = ctx.location.directory;
-      const cache = createVerdictCache<{ probability: number; model: string }>();
       const ask = askModel(ctx);
 
       yield* ctx.permission.hook("evaluate", (evaluation) =>
@@ -124,7 +238,13 @@ export const ServerPlugin = Plugin.define({
               return task;
             },
           };
-          const decision = await evaluate(input, { cache, ask, realpath: realPath });
+          const decision = await evaluate(input, {
+            cache,
+            ask,
+            model: settings.model,
+            threshold: settings.threshold,
+            realpath: realPath,
+          });
 
           if (decision.verdict === "allow") evaluation.effect = "allow";
           await writeAudit(toAuditEntry(decision, evaluation, cwd, new Date(), task));

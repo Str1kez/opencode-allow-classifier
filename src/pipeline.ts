@@ -20,6 +20,8 @@ export interface PipelineOptions {
   readonly cache: VerdictCache<CachedVerdict>;
   /** Absent when the host has no generate API; the default `ask` then stands. */
   readonly ask?: AskModel;
+  /** Classifier model from the effective settings; the stock default applies when absent. */
+  readonly model?: string;
   readonly threshold?: number;
   readonly realpath?: RealPathResolver;
 }
@@ -83,7 +85,7 @@ export async function evaluate(input: EvaluationInput, options: PipelineOptions)
     const outcome = await options.cache.getOrCompute(
       verdictCacheKey(input.cwd, input.resources),
       async () => {
-        const result = await classify(ask, request);
+        const result = await classify(ask, request, options.model);
         if (!result.ok) throw new ClassifierError(result.failure.kind, result.model, result.failure.message);
         return { probability: result.probability, model: result.model };
       },

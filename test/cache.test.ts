@@ -120,3 +120,65 @@ test("a failed producer is not cached and the next call retries", async () => {
   assert.equal(outcome.origin, "computed");
   assert.equal(cache.get("k"), 1);
 });
+
+test("clear() drops every stored entry and resets size", () => {
+  const cache = createVerdictCache<number>();
+  cache.set("a", 1);
+  cache.set("b", 2);
+  assert.equal(cache.size, 2);
+
+  cache.clear();
+
+  assert.equal(cache.size, 0);
+  assert.equal(cache.get("a"), undefined);
+  assert.equal(cache.get("b"), undefined);
+});
+
+test("clear() discards an in-flight computation so it cannot repopulate the cache", async () => {
+  const cache = createVerdictCache<number>();
+  const gate = deferred<number>();
+  let produced = 0;
+
+  const stale = cache.getOrCompute("k", async () => {
+    produced += 1;
+    return gate.promise;
+  });
+  cache.clear();
+
+  gate.resolve(10);
+  assert.deepEqual(await stale, { value: 10, origin: "computed" });
+  assert.equal(cache.get("k"), undefined, "a pre-clear computation must not write after clear()");
+  assert.equal(cache.size, 0);
+
+  const fresh = await cache.getOrCompute("k", async () => {
+    produced += 1;
+    return 20;
+  });
+
+  assert.equal(produced, 2);
+  assert.deepEqual(fresh, { value: 20, origin: "computed" });
+  assert.equal(cache.get("k"), 20);
+});
+
+test("clear() lets a new computation start while the old one is still pending", async () => {
+  const cache = createVerdictCache<number>();
+  const gate = deferred<number>();
+  let produced = 0;
+
+  const stale = cache.getOrCompute("k", async () => {
+    produced += 1;
+    return gate.promise;
+  });
+  cache.clear();
+
+  const fresh = await cache.getOrCompute("k", async () => {
+    produced += 1;
+    return 20;
+  });
+  gate.resolve(10);
+  assert.deepEqual(await stale, { value: 10, origin: "computed" });
+
+  assert.equal(produced, 2);
+  assert.deepEqual(fresh, { value: 20, origin: "computed" });
+  assert.equal(cache.get("k"), 20);
+});

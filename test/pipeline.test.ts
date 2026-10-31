@@ -65,6 +65,27 @@ test("0.9 allows an unknown command, 0.89 asks", async () => {
   assert.equal(asked.probability, 0.89);
 });
 
+test("the configured threshold moves the allow boundary", async () => {
+  const strict = recorder(ok(0.95));
+  const asked = await evaluate(
+    { ...REQUEST, resources: ["make lint"] },
+    { ...options(strict.ask), threshold: 0.99 },
+  );
+
+  assert.equal(asked.verdict, "ask");
+  assert.equal(asked.source, "model");
+  assert.equal(asked.probability, 0.95);
+
+  const lenient = recorder(ok(0.95));
+  const allowed = await evaluate(
+    { ...REQUEST, resources: ["make lint"] },
+    { ...options(lenient.ask), threshold: 0.9 },
+  );
+
+  assert.equal(allowed.verdict, "allow");
+  assert.equal(allowed.source, "model");
+});
+
 test("hard-ask and fired guards never reach the model", async () => {
   const unsafe = recorder(ok(0.99));
 

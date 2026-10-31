@@ -24,6 +24,8 @@ export interface VerdictCache<T> {
   get(key: string): T | undefined;
   set(key: string, value: T): void;
   getOrCompute(key: string, compute: () => Promise<T>): Promise<CacheOutcome<T>>;
+  /** Drops every verdict, so the next call recomputes against the current settings. */
+  clear(): void;
   readonly size: number;
 }
 
@@ -44,6 +46,9 @@ export function createVerdictCache<T>(options: VerdictCacheOptions = {}): Verdic
   const limit = Math.max(1, options.limit ?? MAX_VERDICT_ENTRIES);
   const entries = new Map<string, StoredEntry<T>>();
   const inFlight = new Map<string, Promise<T>>();
+  // Bumped by `clear()`: a computation that started under an older generation belongs to the old
+  // settings and must not repopulate the cache after they changed.
+  let generation = 0;
 
   function get(key: string): T | undefined {
     const entry = entries.get(key);
@@ -75,8 +80,9 @@ export function createVerdictCache<T>(options: VerdictCacheOptions = {}): Verdic
     const pending = inFlight.get(key);
     if (pending !== undefined) return { value: await pending, origin: "cache" };
 
+    const startedAt = generation;
     const promise = compute().then((value) => {
-      set(key, value);
+      if (startedAt === generation) set(key, value);
       return value;
     });
 
@@ -84,14 +90,23 @@ export function createVerdictCache<T>(options: VerdictCacheOptions = {}): Verdic
     try {
       return { value: await promise, origin: "computed" };
     } finally {
-      inFlight.delete(key);
+      // `clear()` already emptied the map; a newer computation may own this key by now, so only
+      // remove the entry that belongs to this call.
+      if (inFlight.get(key) === promise) inFlight.delete(key);
     }
+  }
+
+  function clear(): void {
+    generation += 1;
+    entries.clear();
+    inFlight.clear();
   }
 
   return {
     get,
     set,
     getOrCompute,
+    clear,
     get size() {
       return entries.size;
     },
