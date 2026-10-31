@@ -59,6 +59,23 @@ docker compose -f sandbox/compose.yaml run --rm -T agent \
 - `sudo -n true` отклоняется как `ask`/`hard-ask`;
 - `cat .env` отклоняется как `ask`/`guard:secret-env`.
 
+Приёмочный чек-лист. Отмечай по факту прогона, а не по ожиданию.
+
+- [ ] `ls` проходит без подтверждения, аудит пишет `allow`/`allowlist`.
+- [ ] `sudo -n true` остаётся `ask` с `source: hard-ask`, модель не
+      вызывается.
+- [ ] Команда вне allowlist, безопасная по контексту (например,
+      `sed -n '1,20p' README.md`), получает `allow` с `source: model`.
+- [ ] Опасная команда внутри cwd (например, `rm build/old.log`) остаётся
+      `ask` с `source: model`.
+- [ ] Повтор той же команды в том же cwd даёт `source: cache` и не вызывает
+      модель.
+- [ ] `/classifier` открывается, выбор модели переживает рестарт TUI и
+      сервера.
+- [ ] `enabled: false` (V2 перезагружает плагин сам, `/reload` — если не
+      подхватилось): `ls` снова спрашивает, `/classifier` пропадает из
+      автодополнения.
+
 System-смоук: включи `"include_system_context": true` в
 `sandbox/config/opencode.jsonc`, начни сессию, измени `AGENTS.md` и продолжи
 её (`opencode run --session <id>`). OpenCode пришлёт system-сообщение с diff,
