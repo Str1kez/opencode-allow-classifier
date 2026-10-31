@@ -83,31 +83,10 @@
 
 ## Скиллы
 
-В репозитории два скилла. OpenCode находит их сам, когда открыт в этом
-репозитории: домашний конфиг, симлинки и запись в `skills` не нужны.
-
-- `allow-classifier-install` — установка, `inspect`, `verify` и `rollback`.
-  Только он пишет конфиг.
-- `allow-classifier-analyze` — разбор аудита: кластеры `ask`, рычаги и
-  рекомендации. Только читает, политику не меняет.
-
-### `allow-classifier-analyze`
-
-Группирует `ask` по сигнатуре команды и показывает, где политика мешает
-работе. Отчёт идёт в чат; файл создаётся только по явной просьбе, потому что
-в аудите лежит текст последних сообщений пользователя.
-
-```sh
-npm run report
-npm run report -- --since=7d --source=model --json
-npm run report -- --rule='guard:*'
-```
-
-Окно по умолчанию — 30 дней. `--since` принимает `YYYY-MM-DD` или `<n>d`,
-`--config` задаёт конфиг с `audit_dir` и `threshold`, `--audit-dir`
-переопределяет каталог, `--source` и `--rule` сужают выборку. Аудит `sandbox/`
-и `sandbox-runtime/` по умолчанию исключён. Полный список флагов — в
-[SKILL.md](.opencode/skills/allow-classifier-analyze/SKILL.md).
+Установка, `inspect`, `verify`, `rollback` и разбор аудита живут в скиллах
+`.opencode/skills/`. OpenCode находит их сам, когда открыт в этом репозитории.
+Команды, флаги и границы — в
+[.opencode/skills/README.md](.opencode/skills/README.md).
 
 ## Опции
 
@@ -165,34 +144,16 @@ system-сообщения в аудит не попадает никогда: т
 
 ## Диагностика
 
-### Плагин не загрузился
-
-`package` ведёт на `src/index.ts` вместо корня пакета, версия API не 2.2.x или
-в опциях `enabled: false`. V2 подхватывает исправленный конфиг сам; если
-плагин не появился, форсируй `/reload`.
-
-### `ls` всё равно спрашивает
-
-Плагин не активен, `enabled: false`, нет catch-all `ask` или сработал гард
-(путь вне cwd, секрет в аргументах, редирект). В аудите будет `ask` с
-`source: allowlist` и `rule: guard:*`.
-
-### Классификатор всегда оставляет `ask`
-
-Смотри аудит: `probability` ниже `threshold`, `source: error` с
-`rule: classifier:provider` или `classifier:timeout`, либо в поле `model`
-стоит чат-модель. Выбери decision-модель через `/classifier` или опцией
-`model`.
-
-### Нет `/classifier`
-
-Команда регистрируется только в TUI и только при включённом плагине. После
-смены `enabled` V2 перезагружает плагин сам, `/reload` — принудительный путь.
+Симптомы, аудит и типовые причины — в [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Документация
 
 - [docs/permissions.md](docs/permissions.md): политика, конфиг, гарды, RPC,
   остаточные риски.
+- [docs/diagnostics.md](docs/diagnostics.md): что смотреть, когда плагин
+  молчит или спрашивает лишнее.
+- [.opencode/skills/README.md](.opencode/skills/README.md): скиллы установки
+  и разбора аудита.
 - [GLOSSARY.md](GLOSSARY.md): термины предметной области.
 - [sandbox/README.md](sandbox/README.md): тесты и смоуки в контейнере.
 - [CHANGELOG.md](CHANGELOG.md): история изменений.

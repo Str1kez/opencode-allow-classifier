@@ -87,7 +87,9 @@
   не пересматривается.
 - README переписан под пользователя: установка описана как вызов скилла
   `allow-classifier-install`, технические детали политики вынесены в
-  `docs/permissions.md`, приёмочный чек-лист — в `sandbox/README.md`.
+  `docs/permissions.md`, диагностика — в `docs/diagnostics.md`, описание
+  скиллов — в `.opencode/skills/README.md`, приёмочный чек-лист — в
+  `sandbox/README.md`.
 
 ### Удалено
 
