@@ -1,0 +1,329 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { test } from "node:test";
+
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const CLI = join(REPO_ROOT, ".opencode/skills/allow-classifier-install/scripts/cli.ts");
+const DENY_RESOURCES = [
+  "git push --force*",
+  "git push -f*",
+  "git reset --hard*",
+  "rm -rf*",
+  "*--no-verify*",
+  "*--dangerously-skip-permissions*",
+];
+
+function cleanConfig(packageRoot: string): string {
+  const deny = DENY_RESOURCES.map(
+    (resource) => `    { "action": "shell", "resource": ${JSON.stringify(resource)}, "effect": "deny" }`,
+  ).join(",\n");
+
+  return `{
+  "$schema": "https://opencode.ai/config.json",
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+${deny}
+  ],
+  "plugins": [
+    {
+      "package": ${JSON.stringify(packageRoot)},
+      "options": {
+        "enabled": true
+      }
+    }
+  ]
+}
+`;
+}
+
+interface RunOptions {
+  readonly cwd: string;
+  readonly env?: Record<string, string>;
+}
+
+function run(args: readonly string[], options: RunOptions) {
+  return spawnSync(process.execPath, [CLI, ...args], {
+    cwd: options.cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: join(options.cwd, "home"),
+      XDG_CONFIG_HOME: join(options.cwd, "xdg"),
+      ...options.env,
+    },
+  });
+}
+
+function scratch(t: { after: (fn: () => void) => void }): string {
+  const directory = mkdtempSync(join(tmpdir(), "ocac-install-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+test("install creates the global config with the clean layout", (t) => {
+  const directory = scratch(t);
+  const result = run(["install"], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  const config = join(directory, "xdg/opencode/opencode.jsonc");
+  assert.equal(readFileSync(config, "utf8"), cleanConfig(REPO_ROOT));
+  assert.match(result.stdout, new RegExp(`created ${config.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+});
+
+test("install turns an empty config file into the clean layout", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "configs/opencode.jsonc");
+  mkdirSync(join(directory, "configs"));
+  writeFileSync(config, "\n \t\n");
+
+  const result = run(["install", "--config", config], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(config, "utf8"), cleanConfig(REPO_ROOT));
+});
+
+test("install is an idempotent no-op on a commented config with trailing commas", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  const decorated = cleanConfig(REPO_ROOT)
+    .replace('{\n  "$schema"', '// kept by the owner\n{\n  "$schema"')
+    .replace('  "permissions": [', '  // catch-all first\n  "permissions": [')
+    .replace('  ],\n  "plugins"', '  ], // deny block ends here\n  "plugins"')
+    .replace('        "enabled": true\n', '        "enabled": true,\n')
+    .replace("    }\n  ]\n}", "    },\n  ],\n}");
+  writeFileSync(config, decorated);
+  const before = readFileSync(config, "utf8");
+
+  const first = run(["install", "--config", config], { cwd: directory });
+  const second = run(["install", "--config", config], { cwd: directory });
+
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(first.stdout, /no changes/);
+  assert.match(second.stdout, /no changes/);
+  assert.equal(readFileSync(config, "utf8"), before);
+});
+
+test("install refuses to rewrite a foreign config and leaves it byte-identical", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  const foreign = `{
+  // my own settings
+  "model": "provider/model",
+  "permissions": [{ "action": "shell", "resource": "ls*", "effect": "allow" }],
+}
+`;
+  writeFileSync(config, foreign);
+
+  const result = run(["install", "--config", config], { cwd: directory });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /not the clean classifier layout/);
+  assert.match(result.stderr, /file left unchanged/);
+  assert.equal(readFileSync(config, "utf8"), foreign);
+});
+
+test("install refuses to rewrite invalid JSONC and leaves it byte-identical", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(config, '{ "permissions": [,] }');
+
+  const result = run(["install", "--config", config], { cwd: directory });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /cannot parse/);
+  assert.equal(readFileSync(config, "utf8"), '{ "permissions": [,] }');
+});
+
+test("install --project targets the current project and never the global config", (t) => {
+  const directory = scratch(t);
+  const result = run(["install", "--project"], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(directory, "opencode.jsonc"), "utf8"), cleanConfig(REPO_ROOT));
+  assert.equal(existsSync(join(directory, "xdg/opencode/opencode.jsonc")), false);
+});
+
+test("install falls back to ~/.config when XDG_CONFIG_HOME is empty", (t) => {
+  const directory = scratch(t);
+  const result = run(["install"], { cwd: directory, env: { XDG_CONFIG_HOME: "" } });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(directory, "home/.config/opencode/opencode.jsonc"), "utf8"), cleanConfig(REPO_ROOT));
+});
+
+test("inspect reports the kill switch off", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(
+    config,
+    `{
+  "permissions": [],
+  "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "enabled": false } }],
+}
+`,
+  );
+
+  const text = run(["inspect", "--config", config], { cwd: directory });
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /kill switch: disabled/);
+
+  const json = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(json.status, 0, json.stderr);
+  const report = JSON.parse(json.stdout) as { plugin: { killSwitch: string; enabled: boolean } };
+  assert.equal(report.plugin.killSwitch, "disabled");
+  assert.equal(report.plugin.enabled, false);
+});
+
+test("inspect reports a clean installed config as text and JSON", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(config, cleanConfig(REPO_ROOT));
+
+  const text = run(["inspect", "--config", config], { cwd: directory });
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, new RegExp(`config: ${config.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(text.stdout, /exists: yes/);
+  assert.match(text.stdout, /0: shell "\*" -> ask \(catch-all\)/);
+  assert.match(text.stdout, /catch-all first among shell rules: yes/);
+  assert.match(text.stdout, /deny rules after catch-all: yes/);
+  assert.match(text.stdout, /plugin entry: object/);
+  assert.match(text.stdout, /plugin options: object/);
+  assert.match(text.stdout, /kill switch: enabled/);
+  assert.match(text.stdout, /warnings: none/);
+
+  const json = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(json.status, 0, json.stderr);
+  const report = JSON.parse(json.stdout) as {
+    path: string;
+    exists: boolean;
+    rules: Array<{ index: number; action: string; resource: string; effect: string; catchAll: boolean; valid: boolean }>;
+    catchAll: { present: boolean; index: number; firstAmongShell: boolean };
+    denyAfterCatchAll: boolean;
+    missingDenyRules: string[];
+    plugin: {
+      present: boolean;
+      type: string;
+      package: string;
+      packageMatches: boolean;
+      options: { present: boolean; type: string };
+      killSwitch: string;
+    };
+    warnings: string[];
+  };
+
+  assert.equal(report.path, config);
+  assert.equal(report.exists, true);
+  assert.equal(report.rules.length, 7);
+  assert.deepEqual(report.rules[0], {
+    index: 0,
+    action: "shell",
+    resource: "*",
+    effect: "ask",
+    catchAll: true,
+    valid: true,
+  });
+  assert.deepEqual(report.catchAll, { present: true, index: 0, firstAmongShell: true });
+  assert.equal(report.denyAfterCatchAll, true);
+  assert.deepEqual(report.missingDenyRules, []);
+  assert.equal(report.plugin.present, true);
+  assert.equal(report.plugin.type, "object");
+  assert.equal(report.plugin.package, REPO_ROOT);
+  assert.equal(report.plugin.packageMatches, true);
+  assert.deepEqual(report.plugin.options, { present: true, type: "object" });
+  assert.equal(report.plugin.killSwitch, "enabled");
+  assert.deepEqual(report.warnings, []);
+
+  const repeated = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(repeated.stdout, json.stdout);
+});
+
+test("inspect reads a commented user config with trailing commas and reports problems", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(
+    config,
+    `// owner config
+{
+  "permissions": [
+    { "action": "shell", "resource": "rm -rf*", "effect": "deny" }, // before the catch-all
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "shell", "resource": "git push --force*", "effect": "deny" },
+  ],
+  "plugins": ["some-plugin"],
+}
+`,
+  );
+
+  const json = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(json.status, 0, json.stderr);
+  const report = JSON.parse(json.stdout) as {
+    rules: Array<{ index: number; resource: string; effect: string; catchAll: boolean }>;
+    catchAll: { present: boolean; index: number; firstAmongShell: boolean };
+    denyAfterCatchAll: boolean;
+    missingDenyRules: string[];
+    plugin: { present: boolean; type: string; package: string | null; options: { present: boolean } };
+    warnings: string[];
+  };
+
+  assert.deepEqual(
+    report.rules.map((rule) => [rule.index, rule.resource, rule.effect, rule.catchAll]),
+    [
+      [0, "rm -rf*", "deny", false],
+      [1, "*", "ask", true],
+      [2, "git push --force*", "deny", false],
+    ],
+  );
+  assert.deepEqual(report.catchAll, { present: true, index: 1, firstAmongShell: false });
+  assert.equal(report.denyAfterCatchAll, false);
+  assert.deepEqual(report.missingDenyRules, [
+    "git push -f*",
+    "git reset --hard*",
+    "*--no-verify*",
+    "*--dangerously-skip-permissions*",
+  ]);
+  assert.equal(report.plugin.present, true);
+  assert.equal(report.plugin.type, "string");
+  assert.equal(report.plugin.package, null);
+  assert.equal(report.plugin.options.present, false);
+  assert.ok(report.warnings.some((warning) => /catch-all is not the first shell rule/.test(warning)));
+  assert.ok(report.warnings.some((warning) => /deny rule "rm -rf\*" at index 0 comes before the catch-all/.test(warning)));
+  assert.ok(report.warnings.some((warning) => /plugin entry is a string/.test(warning)));
+
+  const text = run(["inspect", "--config", config], { cwd: directory });
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /catch-all first among shell rules: no/);
+  assert.match(text.stdout, /deny rules after catch-all: no/);
+  assert.match(text.stdout, /kill switch: enabled/);
+  assert.match(text.stdout, /warnings:/);
+});
+
+test("inspect reports duplicate keys without corrupting the report", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(config, '{ "permissions": [], "permissions": [] }');
+
+  const result = run(["inspect", "--config", config, "--json"], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout) as { warnings: string[] };
+  assert.ok(report.warnings.some((warning) => /duplicate key "permissions" at \$/.test(warning)));
+});
+
+test("inspect reports a missing config and parse errors with a nonzero exit", (t) => {
+  const directory = scratch(t);
+  const missing = join(directory, "missing.jsonc");
+
+  const absent = run(["inspect", "--config", missing], { cwd: directory });
+  assert.notEqual(absent.status, 0);
+  assert.match(absent.stdout, /exists: no/);
+
+  const invalid = join(directory, "invalid.jsonc");
+  writeFileSync(invalid, '{ "permissions": [ }');
+  const broken = run(["inspect", "--config", invalid], { cwd: directory });
+  assert.notEqual(broken.status, 0);
+  assert.match(broken.stderr, /Invalid JSONC/);
+});
