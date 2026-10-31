@@ -82,19 +82,30 @@ function resolveTarget(config: string | undefined, project: boolean): string {
 }
 
 function install(target: string): number {
-  const result = installConfig(target, REPO_ROOT);
-  if (result.status === "created" || result.status === "unchanged") {
-    process.stdout.write(`${result.message}\n`);
-    if (result.status === "created") {
-      process.stdout.write(
-        `installed: catch-all ask, ${DENY_RULES.length} deny rules, plugin ${REPO_ROOT}\n`,
-      );
+  const result = installConfig(target, REPO_ROOT, {
+    onDiff: (diff) => process.stdout.write(diff),
+  });
+
+  if (result.status === "conflict") {
+    if (result.diff !== "") {
+      process.stdout.write(`proposed diff (hypothetical, not written):\n${result.diff}`);
     }
-    return 0;
+    process.stderr.write(`${result.message}\n`);
+    return 1;
   }
 
-  process.stderr.write(`${result.message}\n`);
-  return 1;
+  if (result.status === "invalid") {
+    process.stderr.write(`${result.message}\n`);
+    return 1;
+  }
+
+  process.stdout.write(`${result.message}\n`);
+  if (result.status === "created") {
+    process.stdout.write(
+      `installed: catch-all ask, ${DENY_RULES.length} deny rules, plugin ${REPO_ROOT}\n`,
+    );
+  }
+  return 0;
 }
 
 function inspect(target: string, json: boolean): number {
