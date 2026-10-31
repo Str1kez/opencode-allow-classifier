@@ -1,9 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { unifiedDiff } from "./diff.ts";
+import {
+  contentHash,
+  toManifestEdits,
+  writeManifest,
+} from "./install-manifest.ts";
+import type { InstallManifest } from "./install-manifest.ts";
 import { applyEdits, findDuplicateKeys, parseJsonc, toValue } from "./jsonc.ts";
 import type { JsoncDocument } from "./jsonc.ts";
-import { cleanConfigText, isCleanConfig } from "./layout.ts";
+import { DENY_RULES, cleanConfigText, isCleanConfig } from "./layout.ts";
 import { planMerge } from "./merge.ts";
 import type { MergeAdditions } from "./merge.ts";
 
@@ -15,11 +21,15 @@ export interface InstallResult {
   readonly message: string;
   /** Unified diff of the change, empty when there is nothing to compare. */
   readonly diff: string;
+  /** Non-fatal problems: the config is installed, but the rollback record is missing. */
+  readonly warnings: readonly string[];
 }
 
 export interface InstallOptions {
   /** Called with the diff right before the merged file is written. */
   readonly onDiff?: (diff: string) => void;
+  /** Overrides the state directory for the install manifest; tests use a temp dir. */
+  readonly env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -27,12 +37,14 @@ export interface InstallOptions {
  *
  * A missing or empty file gets the clean layout. A configured file is merged: only the missing
  * catch-all, deny rules and plugin entry are added. Order violations and incompatible values stop
- * the install without touching the file.
+ * the install without touching the file. A successful change records what was added so `rollback`
+ * can reverse exactly that later.
  */
 export function installConfig(path: string, packageRoot: string, options: InstallOptions = {}): InstallResult {
+  const configPath = resolve(path);
+
   if (!existsSync(path)) {
-    create(path, packageRoot);
-    return { status: "created", path, message: `created ${path}`, diff: "" };
+    return create(path, configPath, packageRoot, "", false, options);
   }
 
   let text: string;
@@ -43,8 +55,7 @@ export function installConfig(path: string, packageRoot: string, options: Instal
   }
 
   if (text.trim() === "") {
-    create(path, packageRoot);
-    return { status: "created", path, message: `created ${path}`, diff: "" };
+    return create(path, configPath, packageRoot, text, true, options);
   }
 
   let document: JsoncDocument;
@@ -66,7 +77,7 @@ export function installConfig(path: string, packageRoot: string, options: Instal
   }
 
   if (isCleanConfig(value, packageRoot)) {
-    return { status: "unchanged", path, message: `config already installed: ${path}\nno changes`, diff: "" };
+    return unchanged(path);
   }
 
   const result = planMerge(document, packageRoot);
@@ -75,11 +86,11 @@ export function installConfig(path: string, packageRoot: string, options: Instal
       result.proposedText === undefined
         ? ""
         : unifiedDiff(text, result.proposedText, diffLabels(path));
-    return { status: "conflict", path, message: `refusing to merge ${path}: ${result.message}`, diff };
+    return { status: "conflict", path, message: `refusing to merge ${path}: ${result.message}`, diff, warnings: [] };
   }
 
   if (result.plan.edits.length === 0) {
-    return { status: "unchanged", path, message: `config already installed: ${path}\nno changes`, diff: "" };
+    return unchanged(path);
   }
 
   const merged = applyEdits(text, result.plan.edits);
@@ -93,21 +104,77 @@ export function installConfig(path: string, packageRoot: string, options: Instal
   options.onDiff?.(diff);
   writeFileSync(path, merged);
 
+  const manifest: InstallManifest = {
+    version: 1,
+    configPath,
+    postInstallHash: contentHash(merged),
+    original: { exists: true, text },
+    edits: toManifestEdits(text, result.plan.edits),
+    additions: { ...result.plan.additions, schema: false, packageRoot },
+  };
+
   return {
     status: "merged",
     path,
     message: `merged ${path}\nadded: ${describeAdditions(result.plan.additions)}`,
     diff,
+    warnings: recordManifest(manifest, options.env),
   };
 }
 
-function create(path: string, packageRoot: string): void {
+function create(
+  path: string,
+  configPath: string,
+  packageRoot: string,
+  originalText: string,
+  originalExists: boolean,
+  options: InstallOptions,
+): InstallResult {
+  const text = cleanConfigText(packageRoot);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, cleanConfigText(packageRoot));
+  writeFileSync(path, text);
+
+  const manifest: InstallManifest = {
+    version: 1,
+    configPath,
+    postInstallHash: contentHash(text),
+    original: { exists: originalExists, text: originalText },
+    edits: [{ start: 0, end: originalText.length, before: originalText, after: text }],
+    additions: {
+      permissionsArray: true,
+      pluginsArray: true,
+      catchAll: true,
+      denyRules: DENY_RULES.map((rule) => rule.resource),
+      plugin: "added",
+      schema: true,
+      packageRoot,
+    },
+  };
+
+  return {
+    status: "created",
+    path,
+    message: `created ${path}`,
+    diff: "",
+    warnings: recordManifest(manifest, options.env),
+  };
+}
+
+function recordManifest(manifest: InstallManifest, env: NodeJS.ProcessEnv | undefined): string[] {
+  try {
+    writeManifest(manifest, env);
+    return [];
+  } catch (error) {
+    return [`install manifest could not be written; rollback will not be available: ${errorMessage(error)}`];
+  }
+}
+
+function unchanged(path: string): InstallResult {
+  return { status: "unchanged", path, message: `config already installed: ${path}\nno changes`, diff: "", warnings: [] };
 }
 
 function invalid(path: string, reason: string): InstallResult {
-  return { status: "invalid", path, message: `${reason}\nfile left unchanged`, diff: "" };
+  return { status: "invalid", path, message: `${reason}\nfile left unchanged`, diff: "", warnings: [] };
 }
 
 function diffLabels(path: string): { readonly from: string; readonly to: string } {

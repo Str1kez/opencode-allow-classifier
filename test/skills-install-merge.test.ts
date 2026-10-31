@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { manifestPathFor } from "../scripts/install-manifest.ts";
 import { parseJsonc, toValue } from "../scripts/jsonc.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -65,6 +66,7 @@ function run(directory: string, args: readonly string[]) {
       ...process.env,
       HOME: join(directory, "home"),
       XDG_CONFIG_HOME: join(directory, "xdg"),
+      XDG_STATE_HOME: join(directory, "state"),
     },
   });
 }
@@ -135,6 +137,25 @@ test("install adds only missing deny rules to a partially configured config", (t
 
   assert.deepEqual(parsed.plugins[0], { package: "other-plugin", options: { x: 1 } });
   assert.deepEqual((parsed.plugins[1] as { options: unknown }).options, { enabled: false, threshold: 0.8 });
+
+  const manifest = JSON.parse(
+    readFileSync(manifestPathFor(config, { XDG_STATE_HOME: join(directory, "state") }), "utf8"),
+  ) as {
+    original: { exists: boolean; text: string };
+    additions: { catchAll: boolean; denyRules: string[]; plugin: string; pluginsArray: boolean };
+  };
+  assert.equal(manifest.original.exists, true);
+  assert.equal(manifest.original.text, original);
+  assert.deepEqual(manifest.additions.denyRules, [
+    "git push -f*",
+    "git reset --hard*",
+    "rm -rf*",
+    "*--no-verify*",
+    "*--dangerously-skip-permissions*",
+  ]);
+  assert.equal(manifest.additions.catchAll, false);
+  assert.equal(manifest.additions.pluginsArray, false);
+  assert.equal(manifest.additions.plugin, "kept");
 
   const afterFirstRun = read();
   const rerun = run(directory, ["install", "--config", config]);

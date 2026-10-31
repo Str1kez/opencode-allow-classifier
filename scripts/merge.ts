@@ -14,6 +14,7 @@ import {
   lastMember,
   lineIndent,
   parseJsonc,
+  removeArrayItems,
   replaceNode,
 } from "./jsonc.ts";
 import type { JsoncArrayNode, JsoncDocument, JsoncEdit, JsoncNode, JsoncObjectNode } from "./jsonc.ts";
@@ -25,10 +26,14 @@ export type PluginChange = "kept" | "added" | "added-options" | "replaced-string
 export interface MergeAdditions {
   /** The whole `permissions` array was added. */
   readonly permissionsArray: boolean;
+  /** The whole `plugins` array was added. */
+  readonly pluginsArray: boolean;
   readonly catchAll: boolean;
   /** Resources of the deny rules that were appended. */
   readonly denyRules: readonly string[];
   readonly plugin: PluginChange;
+  /** Original string value when `plugin` is `replaced-string`. */
+  readonly pluginString?: string;
 }
 
 export interface MergePlan {
@@ -54,9 +59,11 @@ interface RuleInfo {
 
 interface MutableAdditions {
   permissionsArray: boolean;
+  pluginsArray: boolean;
   catchAll: boolean;
   denyRules: string[];
   plugin: PluginChange;
+  pluginString?: string;
 }
 
 export function planMerge(document: JsoncDocument, packageRoot: string): MergeResult {
@@ -66,6 +73,7 @@ export function planMerge(document: JsoncDocument, packageRoot: string): MergeRe
   const rootMembers: string[] = [];
   const additions: MutableAdditions = {
     permissionsArray: false,
+    pluginsArray: false,
     catchAll: false,
     denyRules: [],
     plugin: "kept",
@@ -174,6 +182,7 @@ function planPlugins(
   if (member === undefined) {
     rootMembers.push(`"plugins": ${pluginsArrayText(document, root, packageRoot)}`);
     additions.plugin = "added";
+    additions.pluginsArray = true;
     return null;
   }
 
@@ -197,6 +206,7 @@ function planPlugins(
   if (entry.type === "string") {
     edits.push(replaceNode(entry, pluginObjectText(packageRoot)));
     additions.plugin = "replaced-string";
+    additions.pluginString = entry.value as string;
     return null;
   }
 
@@ -265,53 +275,9 @@ function moveCatchAllFirst(
   const insertion = multiline ? `${source},\n${lineIndent(text, firstShell.start)}` : `${source}, `;
 
   return applyEdits(text, [
-    removeArrayItem(text, array, catchAllIndex),
+    ...removeArrayItems(text, array, [catchAllIndex]),
     { start: firstShell.start, end: firstShell.start, text: insertion },
   ]);
-}
-
-function removeArrayItem(text: string, array: JsoncArrayNode, index: number): JsoncEdit {
-  const item = array.items[index]!;
-  const next = array.items[index + 1];
-  if (next !== undefined) {
-    const comma = nextSignificant(text, item.end, next.start);
-    if (comma !== null && text[comma] === ",") return { start: item.start, end: comma + 1, text: "" };
-    return { start: item.start, end: item.end, text: "" };
-  }
-
-  const previous = array.items[index - 1];
-  if (previous !== undefined) {
-    const comma = nextSignificant(text, previous.end, item.start);
-    if (comma !== null && text[comma] === ",") return { start: comma, end: item.end, text: "" };
-  }
-
-  return { start: item.start, end: item.end, text: "" };
-}
-
-/** First non-trivia character in `[from, to)`, or `null`. */
-function nextSignificant(text: string, from: number, to: number): number | null {
-  let index = from;
-  while (index < to) {
-    const ch = text[index];
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\uFEFF") {
-      index += 1;
-      continue;
-    }
-    if (ch === "/" && text[index + 1] === "/") {
-      const newline = text.indexOf("\n", index + 2);
-      if (newline === -1 || newline >= to) return null;
-      index = newline;
-      continue;
-    }
-    if (ch === "/" && text[index + 1] === "*") {
-      const end = text.indexOf("*/", index + 2);
-      if (end === -1 || end >= to) return null;
-      index = end + 2;
-      continue;
-    }
-    return index;
-  }
-  return null;
 }
 
 function readRules(array: JsoncArrayNode): RuleInfo[] {

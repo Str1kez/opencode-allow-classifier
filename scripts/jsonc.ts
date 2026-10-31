@@ -437,6 +437,66 @@ function requireElements(texts: readonly string[]): void {
   if (texts.length === 0) throw new Error("nothing to insert");
 }
 
+/** Removes an object member together with one adjacent comma, so the object stays valid. */
+export function removeObjectMember(text: string, object: JsoncObjectNode, key: string): JsoncEdit {
+  const index = object.members.findLastIndex((member) => member.key.value === key);
+  if (index === -1) throw new Error(`cannot remove missing object member ${JSON.stringify(key)}`);
+  const member = object.members[index]!;
+  const next = object.members[index + 1];
+
+  if (next !== undefined) {
+    const comma = significantOffset(text, member.end, next.start);
+    return { start: member.start, end: comma !== null && text[comma] === "," ? comma + 1 : member.end, text: "" };
+  }
+
+  const previous = object.members[index - 1];
+  if (previous !== undefined) {
+    const comma = significantOffset(text, previous.end, member.start);
+    if (comma !== null && text[comma] === ",") return { start: comma, end: member.end, text: "" };
+  }
+
+  return { start: member.start, end: member.end, text: "" };
+}
+
+/**
+ * Removes array items by index. Adjacent items share one removal range, otherwise two edits would
+ * claim the comma between them and `applyEdits` would refuse the overlap.
+ */
+export function removeArrayItems(text: string, array: JsoncArrayNode, indexes: readonly number[]): JsoncEdit[] {
+  const sorted = [...new Set(indexes)].sort((left, right) => left - right);
+  if (sorted.length === 0) return [];
+
+  const runs: Array<[number, number]> = [];
+  for (const index of sorted) {
+    if (!Number.isInteger(index) || index < 0 || index >= array.items.length) {
+      throw new RangeError(`array item index out of bounds: ${index}`);
+    }
+    const last = runs[runs.length - 1];
+    if (last !== undefined && index === last[1] + 1) last[1] = index;
+    else runs.push([index, index]);
+  }
+
+  return runs.map(([start, end]) => {
+    const first = array.items[start]!;
+    const last = array.items[end]!;
+
+    if (end < array.items.length - 1) {
+      const next = array.items[end + 1]!;
+      const comma = significantOffset(text, last.end, next.start);
+      if (comma !== null && text[comma] === ",") return { start: first.start, end: comma + 1, text: "" };
+      return { start: first.start, end: last.end, text: "" };
+    }
+
+    if (start > 0) {
+      const previous = array.items[start - 1]!;
+      const comma = significantOffset(text, previous.end, first.start);
+      if (comma !== null && text[comma] === ",") return { start: comma, end: last.end, text: "" };
+    }
+
+    return { start: first.start, end: last.end, text: "" };
+  });
+}
+
 function containerChildIndent(
   text: string,
   containerStart: number,

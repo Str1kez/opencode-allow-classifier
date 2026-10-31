@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { contentHash, manifestPathFor } from "../scripts/install-manifest.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const CLI = join(REPO_ROOT, ".opencode/skills/allow-classifier-install/scripts/cli.ts");
@@ -52,6 +53,7 @@ function run(args: readonly string[], options: RunOptions) {
       ...process.env,
       HOME: join(options.cwd, "home"),
       XDG_CONFIG_HOME: join(options.cwd, "xdg"),
+      XDG_STATE_HOME: join(options.cwd, "state"),
       ...options.env,
     },
   });
@@ -71,6 +73,24 @@ test("install creates the global config with the clean layout", (t) => {
   const config = join(directory, "xdg/opencode/opencode.jsonc");
   assert.equal(readFileSync(config, "utf8"), cleanConfig(REPO_ROOT));
   assert.match(result.stdout, new RegExp(`created ${config.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+});
+
+test("install records a rollback manifest under the state directory", (t) => {
+  const directory = scratch(t);
+  const result = run(["install"], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  const config = join(directory, "xdg/opencode/opencode.jsonc");
+  const manifestPath = manifestPathFor(config, { XDG_STATE_HOME: join(directory, "state") });
+  assert.equal(existsSync(manifestPath), true);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    configPath: string;
+    postInstallHash: string;
+    original: { exists: boolean };
+  };
+  assert.equal(manifest.configPath, config);
+  assert.equal(manifest.postInstallHash, contentHash(readFileSync(config, "utf8")));
+  assert.equal(manifest.original.exists, false);
 });
 
 test("install turns an empty config file into the clean layout", (t) => {

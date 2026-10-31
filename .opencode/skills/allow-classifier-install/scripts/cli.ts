@@ -6,12 +6,13 @@ import { installConfig } from "../../../../scripts/install.ts";
 import { DENY_RULES } from "../../../../scripts/layout.ts";
 import { formatInspectJson, formatInspectText, inspectConfig } from "../../../../scripts/inspect.ts";
 import { JsoncSyntaxError } from "../../../../scripts/jsonc.ts";
+import { rollbackConfig } from "../../../../scripts/rollback.ts";
 import { formatVerifyText, runVerify } from "../../../../scripts/verify.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
 interface CliOptions {
-  readonly command: "install" | "inspect" | "verify";
+  readonly command: "install" | "inspect" | "verify" | "rollback";
   readonly config: string | undefined;
   readonly project: boolean;
   readonly json: boolean;
@@ -43,12 +44,13 @@ function main(argv: readonly string[]): number {
   if (options.command === "verify") {
     return verify(target, options.harnessVersion, options.depsRoot ?? REPO_ROOT);
   }
+  if (options.command === "rollback") return rollback(target);
   return options.command === "install" ? install(target) : inspect(target, options.json);
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
   const command = argv[0];
-  if (command !== "install" && command !== "inspect" && command !== "verify") {
+  if (command !== "install" && command !== "inspect" && command !== "verify" && command !== "rollback") {
     throw new UsageError(`unknown command: ${command ?? "(none)"}`);
   }
 
@@ -120,11 +122,29 @@ function install(target: string): number {
   }
 
   process.stdout.write(`${result.message}\n`);
+  for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`);
   if (result.status === "created") {
     process.stdout.write(
       `installed: catch-all ask, ${DENY_RULES.length} deny rules, plugin ${REPO_ROOT}\n`,
     );
   }
+  return 0;
+}
+
+function rollback(target: string): number {
+  const result = rollbackConfig(target, {
+    onDiff: (diff) => process.stdout.write(diff),
+  });
+
+  if (result.status === "conflict" || result.status === "invalid") {
+    if (result.diff !== "") {
+      process.stdout.write(`diff since install (not applied):\n${result.diff}`);
+    }
+    process.stderr.write(`${result.message}\n`);
+    return 1;
+  }
+
+  process.stdout.write(`${result.message}\n`);
   return 0;
 }
 
@@ -174,10 +194,12 @@ function usage(): string {
   node .opencode/skills/allow-classifier-install/scripts/cli.ts install [--project] [--config <path>]
   node .opencode/skills/allow-classifier-install/scripts/cli.ts inspect [--project] [--config <path>] [--json]
   node .opencode/skills/allow-classifier-install/scripts/cli.ts verify [--project] [--config <path>] [--harness-version <version>] [--deps-root <path>]
+  node .opencode/skills/allow-classifier-install/scripts/cli.ts rollback [--project] [--config <path>]
 
 Target: $XDG_CONFIG_HOME/opencode/opencode.jsonc (or ~/.config/opencode/opencode.jsonc).
 --project targets ./opencode.jsonc in the current directory.
---config targets an exact file and wins over --project.`;
+--config targets an exact file and wins over --project.
+rollback is destructive and only runs the install record for that exact config.`;
 }
 
 process.exitCode = main(process.argv.slice(2));
