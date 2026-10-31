@@ -393,6 +393,10 @@ test("report text and JSON are stable and keep the documented field order", (t) 
     "filters",
     "totals",
     "clusters",
+    "levers",
+    "recommendations",
+    "observations",
+    "classifierErrors",
   ]);
   assert.deepEqual(Object.keys(report.clusters[0]!), [
     "signature",

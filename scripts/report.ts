@@ -9,6 +9,13 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { AuditEntry } from "../src/audit.ts";
+import {
+  buildLeverReport,
+  type ClassifierErrorReport,
+  type LeverSection,
+  type Observation,
+  type Recommendation,
+} from "./levers.ts";
 
 const MILLISECONDS_PER_DAY = 86_400_000;
 const AUDIT_FILE_NAME = /^evaluate-\d{4}-\d{2}\.jsonl$/;
@@ -64,6 +71,10 @@ export interface AskReport {
   readonly totals: { readonly entries: number; readonly clusters: number };
   /** #14 appends lever sections after this array; the header and cluster shape stay stable. */
   readonly clusters: readonly ClusterReport[];
+  readonly levers: readonly LeverSection[];
+  readonly recommendations: readonly Recommendation[];
+  readonly observations: readonly Observation[];
+  readonly classifierErrors: readonly ClassifierErrorReport[];
 }
 
 export interface CollectOptions {
@@ -74,6 +85,8 @@ export interface CollectOptions {
   readonly now: Date;
   readonly repoRoot: string;
   readonly includeSandbox: boolean;
+  /** Effective safety threshold; the stock default applies when the config does not provide one. */
+  readonly threshold?: number;
 }
 
 export interface CollectResult {
@@ -311,6 +324,7 @@ export function collectReport(options: CollectOptions): CollectResult {
     filters: { sources: [...options.filters.sources], rules: [...options.filters.rules] },
     totals: { entries: selected.length, clusters: clusters.length },
     clusters,
+    ...buildLeverReport(clusters, options.threshold),
   };
 
   return { report, warnings };
@@ -404,6 +418,55 @@ export function formatReportText(report: AskReport): string {
       `projects: ${cluster.projects}`,
       `agents: ${cluster.agents}`,
       `example: ${cluster.example}`,
+    );
+  }
+
+  for (const lever of ["allowlist-and-guards", "model-and-threshold", "hard-ask"] as const) {
+    lines.push("", `lever: ${lever}`);
+    const section = report.levers.find((candidate) => candidate.lever === lever);
+    if (section === undefined || section.clusters.length === 0) {
+      lines.push("  none");
+      continue;
+    }
+    for (const cluster of section.clusters) {
+      lines.push(
+        `  ${cluster.signature} — occurrences: ${cluster.occurrences}`,
+        `    example: ${cluster.example}`,
+        `    note: ${cluster.note}`,
+      );
+    }
+  }
+
+  lines.push("", "recommendations:");
+  if (report.recommendations.length === 0) lines.push("  none");
+  for (const [index, item] of report.recommendations.entries()) {
+    lines.push(
+      `  ${index + 1}. ${item.kind} — ${item.signature}`,
+      `     lever: ${item.lever}`,
+      `     occurrences: ${item.occurrences}`,
+      `     new allows: ${item.newAllows.join(", ")}`,
+      `     risk: ${item.risk}`,
+      `     why: ${item.why}`,
+    );
+  }
+  lines.push("deny rules are out of scope: the report never proposes a deny change.");
+
+  lines.push("", "observations:");
+  if (report.observations.length === 0) lines.push("  none");
+  for (const item of report.observations) {
+    lines.push(
+      `  - ${item.signature} — lever: ${item.lever}, occurrences: ${item.occurrences}`,
+      `    note: ${item.note}`,
+    );
+  }
+
+  lines.push("", "lever: classifier-errors");
+  if (report.classifierErrors.length === 0) lines.push("  none");
+  for (const item of report.classifierErrors) {
+    lines.push(
+      `  ${item.signature} — occurrences: ${item.occurrences}, rule: ${item.rule}`,
+      `    example: ${item.example}`,
+      `    recommendation: ${item.recommendation}`,
     );
   }
 

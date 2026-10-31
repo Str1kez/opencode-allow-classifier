@@ -25,6 +25,8 @@ export class ConfigError extends Error {
 export interface AuditDirectoryResolution {
   readonly directory: string;
   readonly configPath: string | null;
+  /** Effective threshold from the same plugin entry that supplied `audit_dir`, when one was read. */
+  readonly threshold: number | undefined;
   readonly warnings: readonly string[];
 }
 
@@ -40,6 +42,7 @@ export function resolveAuditDirectory(options: ResolveAuditDirectoryOptions): Au
     return {
       directory: resolve(options.cwd, options.explicitAuditDir),
       configPath: null,
+      threshold: undefined,
       warnings: [],
     };
   }
@@ -48,11 +51,13 @@ export function resolveAuditDirectory(options: ResolveAuditDirectoryOptions): Au
     const path = resolve(options.cwd, options.explicitConfig);
     if (!existsSync(path)) throw new ConfigError(`config not found: ${path}`);
 
-    const auditDirectory = readAuditDirectory(path);
+    const config = readClassifierConfig(path);
+    const auditDirectory = config?.auditDirectory;
     return {
       directory:
         auditDirectory === undefined ? openCodeStateDirectory(options.env) : resolve(options.cwd, auditDirectory),
       configPath: path,
+      threshold: config?.threshold,
       warnings: [],
     };
   }
@@ -61,28 +66,44 @@ export function resolveAuditDirectory(options: ResolveAuditDirectoryOptions): Au
   const projectConfig = projectConfigPath(options.cwd);
 
   if (projectConfig !== undefined) {
-    const auditDirectory = tryReadAuditDirectory(projectConfig, warnings);
-    if (auditDirectory !== undefined) {
-      return { directory: resolve(options.cwd, auditDirectory), configPath: projectConfig, warnings };
+    const config = tryReadClassifierConfig(projectConfig, warnings);
+    if (config?.auditDirectory !== undefined) {
+      return {
+        directory: resolve(options.cwd, config.auditDirectory),
+        configPath: projectConfig,
+        threshold: config.threshold,
+        warnings,
+      };
     }
   }
 
   const globalConfig = globalConfigPath(options.env);
   if (globalConfig !== undefined && globalConfig !== projectConfig) {
-    const auditDirectory = tryReadAuditDirectory(globalConfig, warnings);
-    if (auditDirectory !== undefined) {
-      return { directory: resolve(options.cwd, auditDirectory), configPath: globalConfig, warnings };
+    const config = tryReadClassifierConfig(globalConfig, warnings);
+    if (config?.auditDirectory !== undefined) {
+      return {
+        directory: resolve(options.cwd, config.auditDirectory),
+        configPath: globalConfig,
+        threshold: config.threshold,
+        warnings,
+      };
     }
   }
 
-  return { directory: openCodeStateDirectory(options.env), configPath: null, warnings };
+  return { directory: openCodeStateDirectory(options.env), configPath: null, threshold: undefined, warnings };
+}
+
+export interface ClassifierConfig {
+  readonly auditDirectory: string | undefined;
+  readonly threshold: number | undefined;
 }
 
 /**
- * Reads `audit_dir` from the plugin entry. The plugin's own option reader validates the value, so a
- * non-string or empty value falls back to the default exactly as it does at runtime.
+ * Reads the plugin entry once so `audit_dir` and `threshold` come from the same options object.
+ * The plugin's own option reader validates both values, so an invalid one falls back to the default
+ * exactly as it does at runtime.
  */
-export function readAuditDirectory(path: string): string | undefined {
+export function readClassifierConfig(path: string): ClassifierConfig | undefined {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -97,7 +118,12 @@ export function readAuditDirectory(path: string): string | undefined {
     throw new ConfigError(`cannot parse ${path}: ${errorMessage(error)}`);
   }
 
-  return auditDirectoryOf(value);
+  return classifierConfigOf(value);
+}
+
+/** Reads `audit_dir` from the plugin entry; kept as the narrow public seam for existing callers. */
+export function readAuditDirectory(path: string): string | undefined {
+  return readClassifierConfig(path)?.auditDirectory;
 }
 
 /** Nearest config from the working directory up to the filesystem root. */
@@ -139,9 +165,9 @@ function globalConfigPath(env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
-function tryReadAuditDirectory(path: string, warnings: string[]): string | undefined {
+function tryReadClassifierConfig(path: string, warnings: string[]): ClassifierConfig | undefined {
   try {
-    return readAuditDirectory(path);
+    return readClassifierConfig(path);
   } catch (error) {
     // A broken config earlier in the chain must not hide a working one later.
     warnings.push(errorMessage(error));
@@ -149,25 +175,29 @@ function tryReadAuditDirectory(path: string, warnings: string[]): string | undef
   }
 }
 
-function auditDirectoryOf(value: unknown): string | undefined {
+function classifierConfigOf(value: unknown): ClassifierConfig | undefined {
   if (!isRecord(value)) return undefined;
   const plugins = value["plugins"];
   if (!Array.isArray(plugins)) return undefined;
 
-  let fallback: string | undefined;
+  let fallback: ClassifierConfig | undefined;
   for (const entry of plugins) {
     if (!isRecord(entry)) continue;
     const options = entry["options"];
     if (!isRecord(options)) continue;
 
-    const auditDirectory = readOptions(options).auditDirectory;
-    if (auditDirectory === undefined) continue;
+    const parsed = readOptions(options);
+    if (parsed.auditDirectory === undefined) continue;
+    const config: ClassifierConfig = {
+      auditDirectory: parsed.auditDirectory,
+      threshold: parsed.threshold,
+    };
 
     // The package path is the install skill's absolute repository path; a renamed checkout still
     // works through the option name, which only this plugin defines.
     const packageName = typeof entry["package"] === "string" ? entry["package"] : "";
-    if (packageName.includes("opencode-allow-classifier")) return auditDirectory;
-    fallback ??= auditDirectory;
+    if (packageName.includes("opencode-allow-classifier")) return config;
+    fallback ??= config;
   }
 
   return fallback;
