@@ -54,6 +54,7 @@ function main(argv: readonly string[]): number {
       now: new Date(),
       repoRoot: REPO_ROOT,
       includeSandbox: options.includeSandbox,
+      threshold: resolution.threshold,
     });
     for (const warning of warnings) process.stderr.write(`warning: ${warning}\n`);
 
