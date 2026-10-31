@@ -155,6 +155,7 @@ test("readOptions parses the config, ignoring invalid model and threshold values
     auditDirectory: undefined,
     model: undefined,
     threshold: undefined,
+    includeSystemContext: false,
   });
 
   assert.deepEqual(
@@ -165,6 +166,7 @@ test("readOptions parses the config, ignoring invalid model and threshold values
       audit_dir: "/tmp/audit",
       model: "  acme/model  ",
       threshold: 0.75,
+      include_system_context: true,
     }),
     {
       enabled: false,
@@ -173,6 +175,7 @@ test("readOptions parses the config, ignoring invalid model and threshold values
       auditDirectory: "/tmp/audit",
       model: "acme/model",
       threshold: 0.75,
+      includeSystemContext: true,
     },
   );
 
@@ -192,4 +195,11 @@ test("readOptions keeps the kill switch off only for an explicit false", () => {
   assert.equal(readOptions({ enabled: true }).enabled, true);
   assert.equal(readOptions({ enabled: "false" }).enabled, true);
   assert.equal(readOptions({ enabled: 0 }).enabled, true);
+});
+
+test("readOptions includes system context only for an explicit true", () => {
+  assert.equal(readOptions({ include_system_context: true }).includeSystemContext, true);
+  for (const value of [false, "true", 1, null, undefined, {}]) {
+    assert.equal(readOptions({ include_system_context: value }).includeSystemContext, false, String(value));
+  }
 });

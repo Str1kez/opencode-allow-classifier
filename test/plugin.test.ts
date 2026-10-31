@@ -78,6 +78,7 @@ interface Harness {
   config(): Promise<RpcOutcome<ClassifierConfig>>;
   setModel(model: string): Promise<RpcOutcome<ClassifierConfig>>;
   catalogCalls(): number;
+  sessionCalls(): number;
   auditEntries(): Array<Record<string, unknown>>;
   dispose(): void;
 }
@@ -87,6 +88,8 @@ interface World {
   readonly probability?: number;
   readonly messages?: ReadonlyArray<unknown>;
   readonly contextError?: boolean;
+  /** The session store never answers; the hook must time out and keep classifying. */
+  readonly sessionHang?: boolean;
   /** Shared across `start()` calls to model a server restart. */
   readonly storage?: Map<string, unknown>;
   readonly storageGetFailure?: FailureMode;
@@ -156,6 +159,7 @@ async function start(
   let registered: ((input: PermissionEvaluation) => Effect.Effect<void>) | undefined;
   let rpc: CapturedRpc | undefined;
   let catalogCalls = 0;
+  let sessionCalls = 0;
 
   const context = {
     options: { log_dir: logDirectory, audit_dir: auditDirectory, ...options },
@@ -215,8 +219,13 @@ async function start(
       generate: { decisions: world.decisions ?? defaultDecisions(modelCalls, world.probability ?? 0.1) },
     },
     session: {
-      context: () =>
-        world.contextError === true ? Effect.die(new Error("session unavailable")) : Effect.succeed(world.messages ?? []),
+      context: () => {
+        sessionCalls += 1;
+        if (world.sessionHang === true) return Effect.never;
+        return world.contextError === true
+          ? Effect.die(new Error("session unavailable"))
+          : Effect.succeed(world.messages ?? []);
+      },
     },
   } as unknown as PluginContext;
 
@@ -244,6 +253,9 @@ async function start(
     },
     catalogCalls() {
       return catalogCalls;
+    },
+    sessionCalls() {
+      return sessionCalls;
     },
     auditEntries() {
       if (!existsSync(auditDirectory)) return [];
@@ -580,6 +592,7 @@ test("audit records one monthly JSONL line per decision", async () => {
     assert.equal(entry["probability"], null);
     assert.equal(entry["model"], null);
     assert.equal(entry["task"], null);
+    assert.deepEqual(entry["systemContext"], { used: false, length: null, hash: null });
     assert.equal(typeof entry["latency"], "number");
     assert.ok(!Number.isNaN(Date.parse(String(entry["time"]))));
   } finally {
@@ -623,6 +636,110 @@ test("the classifier allows an unknown command at 0.9 and audits the model verdi
   }
 });
 
+test("system context stays out of the prompt by default and the audit records it as unused", async () => {
+  const harness = await start(
+    {},
+    CWD,
+    {
+      probability: 0.9,
+      messages: [
+        { type: "system", text: "internal project rules" },
+        { type: "user", text: "run the linter" },
+      ],
+    },
+  );
+  try {
+    const input = evaluation({ resources: ["make lint"] });
+    await harness.evaluate(input);
+
+    assert.equal(input.effect, "allow");
+    assert.ok(!(harness.modelCalls[0]?.prompt ?? "").includes("internal project rules"));
+    assert.ok(!(harness.modelCalls[0]?.prompt ?? "").includes("\"system\""));
+    assert.deepEqual(harness.auditEntries().at(-1)?.["systemContext"], { used: false, length: null, hash: null });
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("include_system_context puts the last system message in the prompt and audits only its hash", async () => {
+  const harness = await start(
+    { include_system_context: true },
+    CWD,
+    {
+      probability: 0.9,
+      messages: [
+        { type: "system", text: "stale rules" },
+        { type: "system", text: "  project rules: never push  " },
+        { type: "user", text: "run the linter" },
+      ],
+    },
+  );
+  try {
+    const input = evaluation({ resources: ["make lint"] });
+    await harness.evaluate(input);
+
+    assert.equal(input.effect, "allow");
+    const prompt = harness.modelCalls[0]?.prompt ?? "";
+    assert.ok(prompt.includes("\"system\":\"project rules: never push\""));
+    assert.ok(!prompt.includes("stale rules"), "only the last system message is used");
+
+    const entry = harness.auditEntries().at(-1)!;
+    const context = entry["systemContext"] as Record<string, unknown>;
+    assert.equal(context["used"], true);
+    assert.equal(context["length"], "project rules: never push".length);
+    assert.match(String(context["hash"]), /^[0-9a-f]{64}$/);
+    assert.ok(!JSON.stringify(entry).includes("project rules"), "the audit must not carry the text");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("task and system context cost one session read, and hard-ask reads nothing", async () => {
+  const harness = await start(
+    { include_system_context: true },
+    CWD,
+    {
+      probability: 0.9,
+      messages: [
+        { type: "system", text: "project rules" },
+        { type: "user", text: "run the linter" },
+      ],
+    },
+  );
+  try {
+    await harness.evaluate(evaluation({ resources: ["git push origin main"] }));
+    assert.equal(harness.sessionCalls(), 0, "hard-ask must not touch the session");
+
+    await harness.evaluate(evaluation({ resources: ["make lint"] }));
+    assert.equal(harness.sessionCalls(), 1);
+
+    const prompt = harness.modelCalls[0]?.prompt ?? "";
+    assert.ok(prompt.includes("run the linter"));
+    assert.ok(prompt.includes("project rules"));
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("a hanging session read degrades to a verdict without system context", async () => {
+  const harness = await start(
+    { include_system_context: true },
+    CWD,
+    { probability: 0.95, sessionHang: true },
+  );
+  try {
+    const input = evaluation({ resources: ["make lint"] });
+    await harness.evaluate(input);
+
+    assert.equal(input.effect, "allow");
+    assert.equal(harness.modelCalls.length, 1);
+    assert.ok(!(harness.modelCalls[0]?.prompt ?? "").includes("\"system\""));
+    assert.deepEqual(harness.auditEntries().at(-1)?.["systemContext"], { used: false, length: null, hash: null });
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("options.threshold is applied to the live classifier verdict", async () => {
   const strict = await start({ threshold: 0.99 }, CWD, { probability: 0.95 });
   try {
@@ -648,7 +765,7 @@ test("options.threshold is applied to the live classifier verdict", async () => 
 });
 
 test("an unreadable session still gets a verdict, with a null task", async () => {
-  const harness = await start({}, CWD, { probability: 0.95, contextError: true });
+  const harness = await start({ include_system_context: true }, CWD, { probability: 0.95, contextError: true });
   try {
     const input = evaluation({ resources: ["make lint"] });
     await harness.evaluate(input);
@@ -657,6 +774,7 @@ test("an unreadable session still gets a verdict, with a null task", async () =>
     const entry = harness.auditEntries().at(-1);
     assert.equal(entry?.["source"], "model");
     assert.equal(entry?.["task"], null);
+    assert.deepEqual(entry?.["systemContext"], { used: false, length: null, hash: null });
   } finally {
     harness.dispose();
   }

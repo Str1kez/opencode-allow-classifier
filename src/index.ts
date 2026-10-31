@@ -5,12 +5,18 @@ import type { PermissionEvaluation } from "@opencode/plugin/effect/permission";
 import { Cause, Effect, Exit, Option } from "effect";
 import { openAuditLog, toAuditEntry, type AuditEntry, type AuditLog } from "./audit.ts";
 import { createVerdictCache } from "./cache.ts";
-import { normalizeTask } from "./classifier.ts";
+import { UNUSED_SYSTEM_CONTEXT } from "./classifier.ts";
 import { PLUGIN_ID } from "./id.ts";
 import { createGenerateAsk, type DecisionsOperation } from "./model.ts";
 import { readOptions, type ClassifierOptions } from "./options.ts";
 import { openCodeStateDirectory } from "./paths.ts";
-import { evaluate, type CachedVerdict, type EvaluationInput } from "./pipeline.ts";
+import {
+  evaluate,
+  type CachedVerdict,
+  type EvaluationInput,
+  type SessionFacts,
+  type SessionSnapshot,
+} from "./pipeline.ts";
 import { openRawEventLog, type RawEventLog } from "./raw-log.ts";
 import { ClassifierRpc, type ClassifierConfig } from "./rpc.ts";
 import {
@@ -50,30 +56,36 @@ function startRawEventLog(options: ClassifierOptions): RawEventLog | undefined {
 }
 
 /**
- * The last user message is the task behind the shell call, and it is untrusted input to the model.
- * A session that cannot be read is not a reason to fail the permission decision: the classifier just
- * gets no task. The timeout matters because the read happens inside the permission hook: a session
- * store that never answers must not hold the hook open.
+ * The last user message is the task behind the shell call and the last system message carries the
+ * project instructions. Both are untrusted input to the model and are read in one round-trip. A session
+ * that cannot be read is not a reason to fail the permission decision: the classifier just gets no
+ * task and no system context. The timeout matters because the read happens inside the permission hook:
+ * a session store that never answers must not hold the hook open.
  */
 const SESSION_READ_TIMEOUT_MS = 1500;
 
-async function readLastUserMessage(
+async function readSessionSnapshot(
   ctx: PluginContext,
   sessionID: PermissionEvaluation["sessionID"],
-): Promise<string | null> {
+): Promise<SessionSnapshot> {
   try {
     const messages = await Effect.runPromise(
       Effect.timeoutOption(ctx.session.context({ sessionID }), SESSION_READ_TIMEOUT_MS),
     );
-    if (Option.isNone(messages)) return null;
+    if (Option.isNone(messages)) return { task: null, system: null };
 
+    let task: string | null = null;
+    let system: string | null = null;
     for (let index = messages.value.length - 1; index >= 0; index -= 1) {
       const message = messages.value[index];
-      if (message?.type === "user") return normalizeTask(message.text);
+      if (message === undefined) continue;
+      if (task === null && message.type === "user") task = message.text;
+      if (system === null && message.type === "system") system = message.text;
+      if (task !== null && system !== null) break;
     }
-    return null;
+    return { task, system };
   } catch {
-    return null;
+    return { task: null, system: null };
   }
 }
 
@@ -228,14 +240,14 @@ export const ServerPlugin = Plugin.define({
           rawLog?.write(evaluation);
           if (evaluation.action !== "shell" || evaluation.effect !== "ask") return;
 
-          let task: string | null = null;
+          let facts: SessionFacts = { task: null, system: UNUSED_SYSTEM_CONTEXT };
           const input: EvaluationInput = {
             resources: [...evaluation.resources],
             cwd,
             agent: evaluation.agent,
-            readTask: async () => {
-              task = await readLastUserMessage(ctx, evaluation.sessionID);
-              return task;
+            readSession: () => readSessionSnapshot(ctx, evaluation.sessionID),
+            onSessionFacts: (next) => {
+              facts = next;
             },
           };
           const decision = await evaluate(input, {
@@ -244,10 +256,15 @@ export const ServerPlugin = Plugin.define({
             model: settings.model,
             threshold: settings.threshold,
             realpath: realPath,
+            includeSystemContext: options.includeSystemContext,
           });
 
           if (decision.verdict === "allow") evaluation.effect = "allow";
-          await writeAudit(toAuditEntry(decision, evaluation, cwd, new Date(), task));
+          // The audit keeps the hash, length and usage flag, never the system text: it is untrusted
+          // and may contain internal data. The pipeline already normalized the facts.
+          await writeAudit(
+            toAuditEntry(decision, evaluation, cwd, new Date(), facts.task, facts.system),
+          );
         }),
       );
     }),

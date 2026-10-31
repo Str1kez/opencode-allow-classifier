@@ -4,13 +4,15 @@ import { createVerdictCache } from "../src/cache.ts";
 import {
   DEFAULT_MODEL,
   FALLBACK_MODEL,
+  hashSystemContext,
   type AskModel,
   type ModelAnswer,
 } from "../src/classifier.ts";
-import { evaluate, type CachedVerdict, type PipelineOptions } from "../src/pipeline.ts";
+import { evaluate, type CachedVerdict, type PipelineOptions, type SessionFacts } from "../src/pipeline.ts";
 
 const CWD = "/Users/test/project";
-const REQUEST = { cwd: CWD, agent: "build", readTask: async () => "run the linter" };
+const SESSION = { task: "run the linter", system: null };
+const REQUEST = { cwd: CWD, agent: "build", readSession: async () => SESSION };
 
 interface Recorder {
   readonly calls: Array<{ model: string; prompt: string }>;
@@ -250,7 +252,7 @@ test("an empty resource list never reaches the model", async () => {
 test("the task reaches the model prompt truncated", async () => {
   const model = recorder(ok(0.95));
   await evaluate(
-    { ...REQUEST, readTask: async () => `x${"y".repeat(2500)}`, resources: ["make lint"] },
+    { ...REQUEST, readSession: async () => ({ task: `x${"y".repeat(2500)}`, system: null }), resources: ["make lint"] },
     options(model.ask),
   );
 
@@ -259,30 +261,30 @@ test("the task reaches the model prompt truncated", async () => {
   assert.ok(prompt.length < 2500 + 500);
 });
 
-test("the task is read only when the model is asked", async () => {
+test("the session is read once only when the model is asked", async () => {
   const model = recorder(ok(0.95));
   let reads = 0;
-  const readTask = async () => {
+  const readSession = async () => {
     reads += 1;
-    return "run the linter";
+    return SESSION;
   };
 
-  await evaluate({ ...REQUEST, readTask, resources: ["sudo ls"] }, options(model.ask));
+  await evaluate({ ...REQUEST, readSession, resources: ["sudo ls"] }, options(model.ask));
   assert.equal(reads, 0, "hard-ask must not touch the session");
 
-  await evaluate({ ...REQUEST, readTask, resources: ["ls"] }, options(model.ask));
+  await evaluate({ ...REQUEST, readSession, resources: ["ls"] }, options(model.ask));
   assert.equal(reads, 0, "an allowlist hit must not touch the session");
 
-  await evaluate({ ...REQUEST, readTask, resources: ["make lint"] }, options(model.ask));
+  await evaluate({ ...REQUEST, readSession, resources: ["make lint"] }, options(model.ask));
   assert.equal(reads, 1);
 });
 
-test("a failing task read still lets the model decide", async () => {
+test("a failing session read still lets the model decide", async () => {
   const model = recorder(ok(0.95));
   const decision = await evaluate(
     {
       ...REQUEST,
-      readTask: async () => {
+      readSession: async () => {
         throw new Error("session store is down");
       },
       resources: ["make lint"],
@@ -293,4 +295,87 @@ test("a failing task read still lets the model decide", async () => {
   assert.equal(decision.verdict, "ask");
   assert.equal(decision.source, "error");
   assert.equal(model.calls.length, 0);
+});
+
+test("system context reaches the model prompt only when the option is on", async () => {
+  const on = recorder(ok(0.95));
+  const input = { ...REQUEST, readSession: async () => ({ task: "run the linter", system: "project rules" }) };
+
+  await evaluate({ ...input, resources: ["make lint"] }, { ...options(on.ask), includeSystemContext: true });
+  assert.ok(on.calls[0]?.prompt.includes("\"system\":\"project rules\""));
+
+  const off = recorder(ok(0.95));
+  await evaluate({ ...input, resources: ["make lint"] }, options(off.ask));
+  assert.ok(!off.calls[0]?.prompt.includes("\"system\""));
+});
+
+test("evaluate reports normalized session facts once for the audit", async () => {
+  const reported: SessionFacts[] = [];
+  const model = recorder(ok(0.95));
+  const input = {
+    ...REQUEST,
+    readSession: async () => ({ task: "  run the linter  ", system: "  project rules  " }),
+    onSessionFacts: (facts: SessionFacts) => reported.push(facts),
+  };
+
+  await evaluate(
+    { ...input, resources: ["make lint"] },
+    { ...options(model.ask), includeSystemContext: true },
+  );
+
+  assert.deepEqual(reported, [
+    {
+      task: "run the linter",
+      system: {
+        used: true,
+        length: "project rules".length,
+        hash: hashSystemContext("project rules"),
+      },
+    },
+  ]);
+});
+
+test("system context is truncated with an explicit marker in the prompt", async () => {
+  const model = recorder(ok(0.95));
+  await evaluate(
+    { ...REQUEST, readSession: async () => ({ task: null, system: "x".repeat(2500) }), resources: ["make lint"] },
+    { ...options(model.ask), includeSystemContext: true },
+  );
+
+  const prompt = model.calls[0]?.prompt ?? "";
+  assert.ok(prompt.includes("[truncated]"));
+  assert.ok(prompt.length < 2500 + 500);
+});
+
+test("the cache key includes the system context hash", async () => {
+  const model = recorder(ok(0.95), ok(0.1), ok(0.95));
+  const pipeline = { ...options(model.ask), includeSystemContext: true };
+  let system = "first rules";
+  const input = { ...REQUEST, readSession: async () => ({ task: null, system }) };
+
+  const first = await evaluate({ ...input, resources: ["make lint"] }, pipeline);
+  system = "changed rules";
+  const second = await evaluate({ ...input, resources: ["make lint"] }, pipeline);
+  const third = await evaluate({ ...input, resources: ["make lint"] }, pipeline);
+
+  assert.equal(model.calls.length, 2, "changing the system context must reach the model again");
+  assert.equal(first.source, "model");
+  assert.equal(second.source, "model");
+  assert.equal(second.verdict, "ask");
+  assert.equal(third.source, "cache");
+  assert.equal(third.verdict, "ask");
+});
+
+test("changing the system context does not touch the cache when the option is off", async () => {
+  const model = recorder(ok(0.95));
+  const pipeline = options(model.ask);
+  let system = "first rules";
+  const input = { ...REQUEST, readSession: async () => ({ task: null, system }) };
+
+  await evaluate({ ...input, resources: ["make lint"] }, pipeline);
+  system = "changed rules";
+  const second = await evaluate({ ...input, resources: ["make lint"] }, pipeline);
+
+  assert.equal(model.calls.length, 1);
+  assert.equal(second.source, "cache");
 });

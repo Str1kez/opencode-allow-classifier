@@ -12,7 +12,8 @@
 - Профиль [`config/opencode.jsonc`](config/opencode.jsonc): тот же catch-all
   `shell: * → ask` и те же deny-правила, что на хосте. Плагин подключён
   локальным путём `/home/node/repo`, поэтому правки в `src/` подхватываются
-  без пересборки образа.
+  без пересборки образа. `include_system_context` в профиле выключен, как и
+  в пользовательском конфиге.
 
 `--auto` здесь намеренно не используется: с ним хук вообще не вызывается
 для `allow`, и проверять классификатор становится не на чем. Headless-прогон
@@ -57,6 +58,11 @@ docker compose -f sandbox/compose.yaml run --rm -T agent \
 - `ls` проходит и попадает в аудит как `allow`/`allowlist`;
 - `sudo -n true` отклоняется как `ask`/`hard-ask`;
 - `cat .env` отклоняется как `ask`/`guard:secret-env`.
+
+System-смоук: включи `"include_system_context": true` в
+`sandbox/config/opencode.jsonc`, начни сессию, измени `AGENTS.md` и продолжи
+её (`opencode run --session <id>`). OpenCode пришлёт system-сообщение с diff,
+а аудит запишет `systemContext.used: true`, длину и хеш — без текста.
 
 Аудит и сырые логи пишутся в `sandbox/.runtime/` на хосте:
 

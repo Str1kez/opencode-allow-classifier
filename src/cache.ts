@@ -34,9 +34,13 @@ interface StoredEntry<T> {
   readonly storedAt: number;
 }
 
-/** A stable key: the same cwd and the same resources in the same order is the same call. */
-export function verdictCacheKey(cwd: string, commands: ReadonlyArray<string>): string {
-  return JSON.stringify([cwd, commands]);
+/** A stable key: the same cwd, resources and system-context hash is the same call. */
+export function verdictCacheKey(
+  cwd: string,
+  commands: ReadonlyArray<string>,
+  systemContextHash: string | null = null,
+): string {
+  return JSON.stringify([cwd, commands, systemContextHash]);
 }
 
 export function createVerdictCache<T>(options: VerdictCacheOptions = {}): VerdictCache<T> {

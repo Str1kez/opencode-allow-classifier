@@ -14,6 +14,11 @@ export interface ClassifierOptions {
   readonly model: string | undefined;
   /** Safety threshold in `(0, 1]`. An invalid value is ignored and the default applies. */
   readonly threshold: number | undefined;
+  /**
+   * Send the last system message to the classifier. Off by default: it may contain internal data and
+   * leaves the machine with the model call.
+   */
+  readonly includeSystemContext: boolean;
 }
 
 function directory(value: unknown): string | undefined {
@@ -32,5 +37,6 @@ export function readOptions(raw: Readonly<Record<string, unknown>>): ClassifierO
     auditDirectory: directory(raw["audit_dir"]),
     model: normalizeModel(raw["model"]),
     threshold: isThreshold(raw["threshold"]) ? raw["threshold"] : undefined,
+    includeSystemContext: raw["include_system_context"] === true,
   };
 }

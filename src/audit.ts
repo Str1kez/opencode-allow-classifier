@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { UNUSED_SYSTEM_CONTEXT, type SystemContextInfo } from "./classifier.ts";
 import type { Decision } from "./policy.ts";
 
 /** One line of the audit log: enough to explain later why the agent did or did not ask. */
@@ -17,6 +18,8 @@ export interface AuditEntry {
   readonly latency: number;
   /** The user's last message, truncated to 2000 characters. `null` when it could not be read. */
   readonly task: string | null;
+  /** Hash, length and usage flag of the system context; never the text. */
+  readonly systemContext: SystemContextInfo;
 }
 
 export interface AuditLog {
@@ -35,6 +38,7 @@ export function toAuditEntry(
   cwd: string,
   now: Date = new Date(),
   task: string | null = null,
+  systemContext: SystemContextInfo = UNUSED_SYSTEM_CONTEXT,
 ): AuditEntry {
   return {
     time: now.toISOString(),
@@ -49,6 +53,7 @@ export function toAuditEntry(
     model: decision.model,
     latency: decision.latency,
     task,
+    systemContext,
   };
 }
 

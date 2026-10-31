@@ -1,10 +1,13 @@
 import {
   classify,
+  hashSystemContext,
+  normalizeSystemContext,
   normalizeTask,
   SAFETY_THRESHOLD,
   type AskModel,
   type ClassificationRequest,
   type ClassifierFailureKind,
+  type SystemContextInfo,
 } from "./classifier.ts";
 import { verdictCacheKey, type VerdictCache } from "./cache.ts";
 import { decide, type Decision, type DecisionSource, type Verdict } from "./policy.ts";
@@ -24,6 +27,23 @@ export interface PipelineOptions {
   readonly model?: string;
   readonly threshold?: number;
   readonly realpath?: RealPathResolver;
+  /**
+   * Send the last system message to the classifier. Off by default: system text may contain internal
+   * data and leaves the machine when the classifier runs on a remote provider.
+   */
+  readonly includeSystemContext?: boolean;
+}
+
+/** One read of the session, so the task and the system context cost a single round-trip. */
+export interface SessionSnapshot {
+  readonly task: string | null;
+  readonly system: string | null;
+}
+
+/** The normalized context the classifier actually saw. The audit writes this, it never re-derives it. */
+export interface SessionFacts {
+  readonly task: string | null;
+  readonly system: SystemContextInfo;
 }
 
 export interface EvaluationInput {
@@ -32,9 +52,11 @@ export interface EvaluationInput {
   readonly agent?: string;
   /**
    * Read lazily: the session lookup costs a round-trip and may hang, so a hard-ask or an allowlist hit
-   * must never pay for it. Only a call that actually reaches the model asks for the task.
+   * must never pay for it. Only a call that actually reaches the model asks for the session.
    */
-  readonly readTask?: () => Promise<string | null>;
+  readonly readSession?: () => Promise<SessionSnapshot>;
+  /** Called once when the model path runs, with the normalized task and system facts for the audit. */
+  readonly onSessionFacts?: (facts: SessionFacts) => void;
 }
 
 /** Carries the failing model through the cache, which stores values and rejects errors. */
@@ -75,15 +97,32 @@ export async function evaluate(input: EvaluationInput, options: PipelineOptions)
   const threshold = options.threshold ?? SAFETY_THRESHOLD;
 
   try {
-    const task = normalizeTask(input.readTask === undefined ? null : await input.readTask());
+    const session =
+      input.readSession === undefined
+        ? { task: null, system: null }
+        : await input.readSession();
+    const task = normalizeTask(session.task);
+    const system = options.includeSystemContext === true ? normalizeSystemContext(session.system) : null;
+    // The system text is part of the prompt, so a different message must not reuse a verdict scored
+    // against the old instructions. Without the option the hash stays null and the key is unchanged.
+    const systemContextHash = system === null ? null : hashSystemContext(system);
+    input.onSessionFacts?.({
+      task,
+      system: {
+        used: system !== null,
+        length: system === null ? null : system.length,
+        hash: systemContextHash,
+      },
+    });
     const request: ClassificationRequest = {
       commands: input.resources,
       cwd: input.cwd,
       agent: input.agent ?? null,
       task,
+      system,
     };
     const outcome = await options.cache.getOrCompute(
-      verdictCacheKey(input.cwd, input.resources),
+      verdictCacheKey(input.cwd, input.resources, systemContextHash),
       async () => {
         const result = await classify(ask, request, options.model);
         if (!result.ok) throw new ClassifierError(result.failure.kind, result.model, result.failure.message);
