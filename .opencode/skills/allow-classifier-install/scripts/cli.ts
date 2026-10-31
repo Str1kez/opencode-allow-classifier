@@ -6,14 +6,17 @@ import { installConfig } from "../../../../scripts/install.ts";
 import { DENY_RULES } from "../../../../scripts/layout.ts";
 import { formatInspectJson, formatInspectText, inspectConfig } from "../../../../scripts/inspect.ts";
 import { JsoncSyntaxError } from "../../../../scripts/jsonc.ts";
+import { formatVerifyText, runVerify } from "../../../../scripts/verify.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
 interface CliOptions {
-  readonly command: "install" | "inspect";
+  readonly command: "install" | "inspect" | "verify";
   readonly config: string | undefined;
   readonly project: boolean;
   readonly json: boolean;
+  readonly harnessVersion: string | undefined;
+  readonly depsRoot: string | undefined;
 }
 
 class UsageError extends Error {}
@@ -37,18 +40,23 @@ function main(argv: readonly string[]): number {
   }
 
   const target = resolveTarget(options.config, options.project);
+  if (options.command === "verify") {
+    return verify(target, options.harnessVersion, options.depsRoot ?? REPO_ROOT);
+  }
   return options.command === "install" ? install(target) : inspect(target, options.json);
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
   const command = argv[0];
-  if (command !== "install" && command !== "inspect") {
+  if (command !== "install" && command !== "inspect" && command !== "verify") {
     throw new UsageError(`unknown command: ${command ?? "(none)"}`);
   }
 
   let config: string | undefined;
   let project = false;
   let json = false;
+  let harnessVersion: string | undefined;
+  let depsRoot: string | undefined;
 
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -62,6 +70,18 @@ function parseArgs(argv: readonly string[]): CliOptions {
     } else if (argument === "--json") {
       if (command !== "inspect") throw new UsageError("--json is only supported by inspect");
       json = true;
+    } else if (argument === "--harness-version") {
+      const value = argv[index + 1];
+      if (value === undefined) throw new UsageError("--harness-version requires a version");
+      if (command !== "verify") throw new UsageError("--harness-version is only supported by verify");
+      harnessVersion = value;
+      index += 1;
+    } else if (argument === "--deps-root") {
+      const value = argv[index + 1];
+      if (value === undefined) throw new UsageError("--deps-root requires a path");
+      if (command !== "verify") throw new UsageError("--deps-root is only supported by verify");
+      depsRoot = value;
+      index += 1;
     } else if (argument === "--help" || argument === "-h") {
       throw new UsageError("use --help without a subcommand");
     } else {
@@ -69,7 +89,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     }
   }
 
-  return { command, config, project, json };
+  return { command, config, project, json, harnessVersion, depsRoot };
 }
 
 function resolveTarget(config: string | undefined, project: boolean): string {
@@ -116,6 +136,12 @@ function inspect(target: string, json: boolean): number {
   }
 }
 
+function verify(target: string, harnessVersion: string | undefined, depsRoot: string): number {
+  const report = runVerify(target, { packageRoot: REPO_ROOT, depsRoot, harnessVersion });
+  process.stdout.write(formatVerifyText(report));
+  return report.ok ? 0 : 1;
+}
+
 function reportReadError(target: string, error: unknown, json: boolean): number {
   const code = (error as NodeJS.ErrnoException).code;
   const message = code === "ENOENT" ? "config not found" : `cannot read ${target}: ${errorMessage(error)}`;
@@ -136,6 +162,7 @@ function usage(): string {
   return `Usage:
   node .opencode/skills/allow-classifier-install/scripts/cli.ts install [--project] [--config <path>]
   node .opencode/skills/allow-classifier-install/scripts/cli.ts inspect [--project] [--config <path>] [--json]
+  node .opencode/skills/allow-classifier-install/scripts/cli.ts verify [--project] [--config <path>] [--harness-version <version>] [--deps-root <path>]
 
 Target: $XDG_CONFIG_HOME/opencode/opencode.jsonc (or ~/.config/opencode/opencode.jsonc).
 --project targets ./opencode.jsonc in the current directory.
