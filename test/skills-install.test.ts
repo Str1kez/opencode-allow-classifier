@@ -253,7 +253,7 @@ test("inspect reads a commented user config with trailing commas and reports pro
     { "action": "shell", "resource": "*", "effect": "ask" },
     { "action": "shell", "resource": "git push --force*", "effect": "deny" },
   ],
-  "plugins": ["some-plugin"],
+  "plugins": [${JSON.stringify(REPO_ROOT)}],
 }
 `,
   );
@@ -265,7 +265,15 @@ test("inspect reads a commented user config with trailing commas and reports pro
     catchAll: { present: boolean; index: number; firstAmongShell: boolean };
     denyAfterCatchAll: boolean;
     missingDenyRules: string[];
-    plugin: { present: boolean; type: string; package: string | null; options: { present: boolean } };
+    plugin: {
+      present: boolean;
+      type: string;
+      package: string | null;
+      packageMatches: boolean;
+      options: { present: boolean };
+      killSwitch: string;
+      enabled: boolean | null;
+    };
     warnings: string[];
   };
 
@@ -287,8 +295,11 @@ test("inspect reads a commented user config with trailing commas and reports pro
   ]);
   assert.equal(report.plugin.present, true);
   assert.equal(report.plugin.type, "string");
-  assert.equal(report.plugin.package, null);
+  assert.equal(report.plugin.package, REPO_ROOT);
+  assert.equal(report.plugin.packageMatches, true);
   assert.equal(report.plugin.options.present, false);
+  assert.equal(report.plugin.killSwitch, "unknown");
+  assert.equal(report.plugin.enabled, null);
   assert.ok(report.warnings.some((warning) => /catch-all is not the first shell rule/.test(warning)));
   assert.ok(report.warnings.some((warning) => /deny rule "rm -rf\*" at index 0 comes before the catch-all/.test(warning)));
   assert.ok(report.warnings.some((warning) => /plugin entry is a string/.test(warning)));
@@ -297,8 +308,39 @@ test("inspect reads a commented user config with trailing commas and reports pro
   assert.equal(text.status, 0, text.stderr);
   assert.match(text.stdout, /catch-all first among shell rules: no/);
   assert.match(text.stdout, /deny rules after catch-all: no/);
-  assert.match(text.stdout, /kill switch: enabled/);
+  assert.match(text.stdout, /kill switch: unknown/);
   assert.match(text.stdout, /warnings:/);
+});
+
+test("inspect does not read the kill switch from a foreign plugin entry", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(
+    config,
+    `{
+  "permissions": [],
+  "plugins": [{ "package": "some-other-plugin", "options": { "enabled": false } }],
+}
+`,
+  );
+
+  const text = run(["inspect", "--config", config], { cwd: directory });
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /plugin entry: missing/);
+  assert.match(text.stdout, /kill switch: unknown/);
+  assert.doesNotMatch(text.stdout, /kill switch: disabled/);
+
+  const json = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(json.status, 0, json.stderr);
+  const report = JSON.parse(json.stdout) as {
+    plugin: { present: boolean; type: string; killSwitch: string; enabled: boolean | null };
+    warnings: string[];
+  };
+  assert.equal(report.plugin.present, false);
+  assert.equal(report.plugin.type, "missing");
+  assert.equal(report.plugin.killSwitch, "unknown");
+  assert.equal(report.plugin.enabled, null);
+  assert.ok(report.warnings.includes(`plugin entry for ${REPO_ROOT} is not found`));
 });
 
 test("inspect reports duplicate keys without corrupting the report", (t) => {
@@ -311,6 +353,15 @@ test("inspect reports duplicate keys without corrupting the report", (t) => {
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout) as { warnings: string[] };
   assert.ok(report.warnings.some((warning) => /duplicate key "permissions" at \$/.test(warning)));
+});
+
+test("the install skill is discoverable through SKILL.md frontmatter", () => {
+  const skill = readFileSync(join(REPO_ROOT, ".opencode/skills/allow-classifier-install/SKILL.md"), "utf8");
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skill);
+
+  assert.ok(frontmatter, "SKILL.md starts with frontmatter");
+  assert.match(frontmatter[1]!, /^name: allow-classifier-install$/m);
+  assert.match(frontmatter[1]!, /^description: .+$/m);
 });
 
 test("inspect reports a missing config and parse errors with a nonzero exit", (t) => {
