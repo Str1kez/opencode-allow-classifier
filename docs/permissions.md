@@ -34,6 +34,8 @@
       "package": "@str1kez/opencode-allow-classifier",
       "options": {
         "enabled": true,
+        // Вероятность в (0, 1]; ниже — больше автоматических allow.
+        "threshold": 0.9,
         // System-сообщение может содержать внутренние данные; по умолчанию не уходит.
         "include_system_context": false
       }
