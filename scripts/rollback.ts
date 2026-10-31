@@ -119,7 +119,18 @@ export function rollbackConfig(path: string, options: RollbackOptions = {}): Rol
     );
   }
 
-  return finish(path, manifest, current, proposed, env, options);
+  // Install created this file, so an empty object is rollback residue, not user data. Comments and
+  // members added after install survive the edits and keep the file.
+  const next = !manifest.original.exists && isEmptyObjectText(proposed) ? null : proposed;
+  return finish(path, manifest, current, next, env, options);
+}
+
+/**
+ * Removing members keeps the whitespace around them, so the result is `{\n  \n}`, not `{}`. Any
+ * comment left in the file is non-whitespace and makes this false.
+ */
+function isEmptyObjectText(text: string): boolean {
+  return text.replace(/\s+/g, "") === "{}";
 }
 
 function finish(

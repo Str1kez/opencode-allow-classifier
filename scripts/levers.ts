@@ -7,6 +7,8 @@
  * the same clusters produce the same bytes.
  */
 import { SAFETY_THRESHOLD } from "../src/classifier.ts";
+import { DECISION_SOURCES } from "../src/policy.ts";
+import { GUARD_RULES, HARD_ASK_RULES } from "../src/rules.ts";
 import { hasActiveShellSyntax, programOf, tokenize } from "../src/shell.ts";
 import type { ClusterReport } from "./report.ts";
 
@@ -65,42 +67,24 @@ export interface LeverReport {
 }
 
 /**
- * A guard that protects secrets, writes, system paths, execution or the cwd boundary is not a tuning
- * candidate: the ask is the point. The report says "keep" and never suggests widening it.
- */
-const SAFETY_GUARDS: ReadonlySet<string> = new Set([
-  "outside-cwd",
-  "untrusted-binary",
-  "system-etc",
-  "system-proc",
-  "endless-read",
-  "stdin-read",
-  "jq-environment",
-  "redirect",
-  "tee",
-  "output-short-flag",
-  "output-long-flag",
-  "rg-preprocessor",
-  "git-external-command",
-  "file-read-flag",
-  "jq-program-file",
-  "set-clock",
-  "tail-follow",
-  "file-compile",
-  "shell-operator",
-  "shell-substitution",
-  "shell-backtick",
-  "rg-unrestricted",
-  "recursive-search",
-  "find-write",
-  "find-exec",
-]);
-
-/**
  * The one guard that is a false-positive candidate: it is deliberately noisy about quoted
  * metacharacters. Every other guard maps to a real write, a secret or an execution path.
  */
 const FALSE_POSITIVE_GUARDS: ReadonlySet<string> = new Set(["shell-metacharacter"]);
+
+/**
+ * A guard that protects secrets, writes, system paths, execution or the cwd boundary is not a tuning
+ * candidate: the ask is the point. The report says "keep" and never suggests widening it.
+ *
+ * Derived from the runtime table so a new guard is protected by default. Secrets are covered by the
+ * `secret-` prefix check in `isDenyLikeGuard`, and the metacharacter catch-all is the deliberate
+ * false-positive candidate, so both stay out of this set.
+ */
+const SAFETY_GUARDS: ReadonlySet<string> = new Set(
+  GUARD_RULES.map((rule) => rule.name).filter(
+    (name) => !name.startsWith("secret-") && !FALSE_POSITIVE_GUARDS.has(name),
+  ),
+);
 
 /**
  * Shapes the analyzer is willing to call read-only without a matching allowlist rule. Deliberately
@@ -138,20 +122,7 @@ const READ_ONLY_SHAPES: readonly (readonly string[])[] = [
 ];
 
 /** The hard-ask categories that must never be weakened, even by a narrow exception. */
-const FORBIDDEN_HARD_ASK: ReadonlySet<string> = new Set([
-  "sudo",
-  "git-push",
-  "rm-outside-cwd",
-  "npm-install",
-  "pip-install",
-  "uv-install",
-  "cargo-install",
-  "brew-install",
-  "alembic-migration",
-  "prisma-migration",
-  "goose-migration",
-  "flyway-migration",
-]);
+const FORBIDDEN_HARD_ASK: ReadonlySet<string> = new Set(HARD_ASK_RULES.map((rule) => rule.name));
 
 const RECOMMENDATION_RANK: Readonly<Record<RecommendationKind, number>> = {
   "allowlist-expansion": 0,
@@ -177,7 +148,7 @@ export function leverOf(cluster: ClusterReport): Lever {
   return "classifier-errors";
 }
 
-const KNOWN_SOURCES: ReadonlySet<string> = new Set(["allowlist", "default", "model", "cache", "hard-ask", "error"]);
+const KNOWN_SOURCES: ReadonlySet<string> = new Set(DECISION_SOURCES);
 
 function hasUnknownSource(sources: Readonly<Record<string, number>>): boolean {
   return Object.keys(sources).some((source) => !KNOWN_SOURCES.has(source));

@@ -22,6 +22,8 @@ const MILLISECONDS_PER_DAY = 86_400_000;
 const AUDIT_FILE_NAME = /^evaluate-\d{4}-\d{2}\.jsonl$/;
 /** Eight or more hex characters with at least one letter: commit hashes, not plain numbers. */
 const LONG_HEX_TOKEN = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{8,}\b/gi;
+/** A single-quoted or double-quoted span; the contents are data, not command shape. */
+const QUOTED_SPAN = /'[^']*'|"[^"]*"/g;
 const EMPTY_SIGNATURE = "<empty>";
 
 /** A bad `--since` is a usage error, not a broken audit. */
@@ -137,15 +139,48 @@ export function rawCommand(resources: readonly string[]): string {
 }
 
 /**
- * Clustering key. Whitespace collapses, numbers become `<n>` and long hex tokens become `<hex>`, so
- * repeated commands with different issue numbers, line counts and commit hashes land in one cluster.
- * Paths and quoted text stay as-is: the ticket only asks for numeric and hex normalization. The
+ * Clustering key. Whitespace collapses, quoted spans become `<text>`, path-like positional tokens
+ * become `<path>`, long hex tokens become `<hex>` and numbers become `<n>`, so repeated commands
+ * with different file names, messages, issue numbers and commit hashes land in one cluster. The
  * collapsed key is safe because the raw `activeSyntax` flag is computed separately, per cluster.
  */
 export function commandSignature(resources: readonly string[]): string {
   const command = rawCommand(resources).replace(/\s+/g, " ").trim();
   if (command.length === 0) return EMPTY_SIGNATURE;
-  return command.replace(LONG_HEX_TOKEN, "<hex>").replace(/\d+/g, "<n>");
+
+  return command
+    .replace(QUOTED_SPAN, "<text>")
+    .split(" ")
+    .map(normalizeSignatureToken)
+    .filter((token) => token.length > 0)
+    .join(" ")
+    .replace(LONG_HEX_TOKEN, "<hex>")
+    .replace(/\d+/g, "<n>");
+}
+
+/**
+ * A positional operand that names a file or a directory: an explicit path, a home shortcut, a
+ * dot-relative name or a short alphabetic extension (`README.md`, `.env`, `a.ts`). Short on purpose:
+ * `v1.2.3` and other version-like tokens must not turn into `<path>`.
+ */
+function isPathToken(token: string): boolean {
+  return token.includes("/") || token.startsWith("~") || token.startsWith(".") || /\.[A-Za-z]{1,8}$/.test(token);
+}
+
+/**
+ * `--` only ends option parsing, it is not a flag; dropping it lets `cat -- ./notes.md` share a
+ * cluster with `cat src/a.ts`. A flag keeps its name; only a path-like `--flag=value` loses the
+ * value, and an attached quote is already `<text>` by this point.
+ */
+function normalizeSignatureToken(token: string): string {
+  if (token === "--") return "";
+  if (token.startsWith("-")) {
+    const equals = token.indexOf("=");
+    return equals > 0 && isPathToken(token.slice(equals + 1))
+      ? `${token.slice(0, equals)}=<path>`
+      : token;
+  }
+  return isPathToken(token) ? "<path>" : token;
 }
 
 /** Rule strings may hold several names (`git-status,git-diff`); a glob matches any one of them. */
@@ -280,14 +315,23 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** Test data directories inside the checkout: the legacy `sandbox/` and the mount-based one. */
+const REPO_SANDBOX_DIRECTORIES = ["sandbox", "sandbox-runtime"] as const;
+/** The sandbox mount inside the container, where the checkout itself is somewhere else. */
+const CONTAINER_SANDBOX_ROOT = "/sandbox-runtime";
+
 /**
- * True when `path` is `<repo>/sandbox` or below. Lexical on purpose: the report must not touch the
- * filesystem to decide whether it may read the filesystem.
+ * True when `path` is a sandbox directory or below, either inside the checkout or at the container
+ * mount. Lexical on purpose: the report must not touch the filesystem to decide whether it may read
+ * the filesystem.
  */
 export function isSandboxPath(path: string, repoRoot: string): boolean {
-  const sandbox = resolve(repoRoot, "sandbox");
   const target = resolve(path);
-  return target === sandbox || target.startsWith(`${sandbox}${sep}`);
+  const roots = [
+    ...REPO_SANDBOX_DIRECTORIES.map((name) => resolve(repoRoot, name)),
+    resolve(CONTAINER_SANDBOX_ROOT),
+  ];
+  return roots.some((root) => target === root || target.startsWith(`${root}${sep}`));
 }
 
 export function collectReport(options: CollectOptions): CollectResult {

@@ -26,8 +26,12 @@ export type Verdict = "allow" | "ask";
  * Which stage produced the verdict. `cache` and `model` are unused until the classifier slice; they are
  * part of the contract now so the audit reader does not have to learn a second vocabulary later.
  * `default` marks the fall-through that asks the human because no rule matched yet.
+ *
+ * The runtime list and the type come from one place: the report must not keep a second copy of the
+ * source vocabulary.
  */
-export type DecisionSource = "hard-ask" | "allowlist" | "default" | "cache" | "model" | "error";
+export const DECISION_SOURCES = ["hard-ask", "allowlist", "default", "cache", "model", "error"] as const;
+export type DecisionSource = (typeof DECISION_SOURCES)[number];
 
 export interface Decision {
   readonly verdict: Verdict;

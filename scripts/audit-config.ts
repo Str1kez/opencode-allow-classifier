@@ -8,12 +8,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readOptions } from "../src/options.ts";
 import { openCodeStateDirectory } from "../src/paths.ts";
 import { parseJsonc, toValue } from "./jsonc.ts";
 
 /** Both names OpenCode accepts; the commented one wins when a directory has both. */
 const CONFIG_NAMES = ["opencode.jsonc", "opencode.json"] as const;
+
+/** Root of this checkout, independent of the directory it was cloned into. */
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+/** Stable fragment of the package name; a published or renamed reference still carries it. */
+const PACKAGE_NAME_FRAGMENT = "opencode-allow-classifier";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -163,11 +169,6 @@ export function readClassifierConfig(path: string): ClassifierConfig | undefined
   return classifierConfigOf(value);
 }
 
-/** Reads `audit_dir` from the plugin entry; kept as the narrow public seam for existing callers. */
-export function readAuditDirectory(path: string): string | undefined {
-  return readClassifierConfig(path)?.auditDirectory;
-}
-
 /** Nearest config from the working directory up to the filesystem root. */
 function projectConfigPath(cwd: string): string | undefined {
   let directory = resolve(cwd);
@@ -222,27 +223,32 @@ function classifierConfigOf(value: unknown): ClassifierConfig | undefined {
   const plugins = value["plugins"];
   if (!Array.isArray(plugins)) return undefined;
 
-  let fallback: ClassifierConfig | undefined;
   for (const entry of plugins) {
-    if (!isRecord(entry)) continue;
+    if (!isRecord(entry) || !isClassifierEntry(entry)) continue;
     const options = entry["options"];
     if (!isRecord(options)) continue;
 
     const parsed = readOptions(options);
     if (parsed.auditDirectory === undefined && parsed.threshold === undefined) continue;
-    const config: ClassifierConfig = {
+    return {
       auditDirectory: parsed.auditDirectory,
       threshold: parsed.threshold,
     };
-
-    // The package path is the install skill's absolute repository path; a renamed checkout still
-    // works through the option name, which only this plugin defines.
-    const packageName = typeof entry["package"] === "string" ? entry["package"] : "";
-    if (packageName.includes("opencode-allow-classifier")) return config;
-    fallback ??= config;
   }
 
-  return fallback;
+  return undefined;
+}
+
+/**
+ * Only this plugin may choose where the audit lives or which threshold it runs with. A foreign
+ * entry that happens to carry the same option names must not redirect the reader; the install
+ * skill writes either the package name or the absolute checkout path.
+ */
+function isClassifierEntry(entry: Record<string, unknown>): boolean {
+  const reference = entry["package"];
+  if (typeof reference !== "string" || reference.length === 0) return false;
+  if (reference.includes(PACKAGE_NAME_FRAGMENT)) return true;
+  return resolve(reference) === PACKAGE_ROOT;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

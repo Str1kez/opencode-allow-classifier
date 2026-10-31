@@ -86,6 +86,41 @@ test("rollback deletes a config file that install created", (t) => {
   assert.equal(existsSync(manifestPath(config, directory)), false);
 });
 
+test("rollback deletes a created config after the user reformatted it", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "created", "opencode.jsonc");
+  assert.equal(run(["install", "--config", config], { cwd: directory }).status, 0);
+
+  // A reformat changes the hash without touching an installer node; removing the nodes leaves nothing.
+  const reformatted = readFileSync(config, "utf8").replaceAll("  ", "    ");
+  writeFileSync(config, reformatted);
+
+  const rolled = run(["rollback", "--config", config], { cwd: directory });
+
+  assert.equal(rolled.status, 0, rolled.stderr);
+  assert.match(rolled.stdout, /config file removed/);
+  assert.equal(existsSync(config), false);
+  assert.equal(existsSync(manifestPath(config, directory)), false);
+});
+
+test("rollback keeps a created config when the user added data after install", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "created", "opencode.jsonc");
+  assert.equal(run(["install", "--config", config], { cwd: directory }).status, 0);
+
+  const edited = readFileSync(config, "utf8").replace("{\n", '{\n  "theme": "dark",\n');
+  writeFileSync(config, edited);
+
+  const rolled = run(["rollback", "--config", config], { cwd: directory });
+
+  assert.equal(rolled.status, 0, rolled.stderr);
+  const text = readFileSync(config, "utf8");
+  assert.match(text, /"theme": "dark"/);
+  assert.doesNotMatch(text, /"permissions"/);
+  assert.doesNotMatch(text, /"plugins"/);
+  assert.doesNotMatch(text, /"\$schema"/);
+});
+
 test("rollback restores an originally empty config byte for byte", (t) => {
   const directory = scratch(t);
   const config = join(directory, "opencode.jsonc");

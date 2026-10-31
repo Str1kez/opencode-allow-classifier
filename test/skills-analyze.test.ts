@@ -84,6 +84,7 @@ interface Report {
   filters: { sources: string[]; rules: string[] };
   totals: { entries: number; clusters: number };
   clusters: Cluster[];
+  recommendations: Array<{ kind: string; signature: string }>;
 }
 
 function parseReport(result: { stdout: string }): Report {
@@ -353,6 +354,62 @@ test("report takes audit_dir from --config, project discovery, global config, or
   assert.match(fromState.stderr, /audit directory not found/);
 });
 
+test("report ignores audit_dir and threshold from a foreign plugin entry", (t) => {
+  const directory = scratch(t);
+  const foreignAudit = join(directory, "foreign-audit");
+  writeLines(foreignAudit, "evaluate-2026-10.jsonl", [auditEntry({ resources: ["foreign command"] })]);
+  const stateAudit = join(directory, "state", "opencode");
+  writeLines(stateAudit, "evaluate-2026-10.jsonl", [
+    auditEntry({ resources: ["npm test"], source: "model", rule: "model", probability: 0.4 }),
+    auditEntry({ resources: ["npm test"], source: "model", rule: "model", probability: 0.5 }),
+    auditEntry({ resources: ["npm test"], source: "model", rule: "model", probability: 0.6 }),
+  ]);
+
+  const config = join(directory, "config.jsonc");
+  writeFileSync(
+    config,
+    `{
+  "plugins": [
+    {
+      "package": "some-other-plugin",
+      "options": { "audit_dir": ${JSON.stringify(foreignAudit)}, "threshold": 0.1 },
+    },
+  ],
+}
+`,
+  );
+
+  const result = run(["--config", config, "--since", "2000-01-01", "--json"], { cwd: directory });
+  assert.equal(result.status, 0, result.stderr);
+
+  const report = parseReport(result);
+  assert.equal(report.auditDir, stateAudit);
+  assert.deepEqual(report.clusters.map((cluster) => cluster.signature), ["npm test"]);
+  // The foreign threshold 0.1 is ignored too: under the default 0.9, 0.5 is a lowering candidate.
+  assert.deepEqual(
+    report.recommendations.map((item) => item.kind),
+    ["threshold-lowering"],
+  );
+});
+
+test("report honors the classifier entry whose package path resolves to this checkout", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [auditEntry()]);
+
+  // `..` from `<repo>/scripts` resolves to the package root and carries no package name, so only
+  // the path comparison can accept it.
+  const config = join(directory, "config.jsonc");
+  writeFileSync(
+    config,
+    `{ "plugins": [{ "package": "..", "options": { "audit_dir": ${JSON.stringify(audit)} } }] }`,
+  );
+
+  const result = run(["--config", config, "--json"], { cwd: join(REPO_ROOT, "scripts") });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(parseReport(result).auditDir, audit);
+});
+
 test("report keeps the raw command as the cluster example, not the signature", (t) => {
   const directory = scratch(t);
   const audit = join(directory, "audit");
@@ -368,6 +425,55 @@ test("report keeps the raw command as the cluster example, not the signature", (
   assert.equal(cluster?.signature, "git log -<n>");
   // "-10" sorts before "-5"; the example must show the real command, not `git log -<n>`.
   assert.equal(cluster?.example, "git log -10");
+});
+
+test("report normalizes paths and quoted text into the command signature", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    auditEntry({ resources: ["cat src/a.ts"], probability: 0.4 }),
+    auditEntry({ resources: ["cat lib/b.ts"], probability: 0.5 }),
+    auditEntry({ resources: ["cat -- ./notes.md"], probability: 0.6 }),
+    auditEntry({ resources: ['echo "a"'], probability: 0.7 }),
+    auditEntry({ resources: ['echo "b"'], probability: 0.8 }),
+    auditEntry({ resources: ["gh issue view 1"], probability: 0.2 }),
+  ]);
+
+  const result = run(["--audit-dir", audit, "--since", "2000-01-01", "--json"], { cwd: directory });
+  assert.equal(result.status, 0, result.stderr);
+
+  const report = parseReport(result);
+  assert.deepEqual(
+    report.clusters.map((cluster) => [cluster.signature, cluster.occurrences]),
+    [
+      ["cat <path>", 3],
+      ["echo <text>", 2],
+      ["gh issue view <n>", 1],
+    ],
+  );
+
+  // The example stays raw: paths and quotes survive for the human reading the report.
+  const cat = report.clusters.find((cluster) => cluster.signature === "cat <path>");
+  assert.equal(cat?.example, "cat -- ./notes.md");
+  const echo = report.clusters.find((cluster) => cluster.signature === "echo <text>");
+  assert.equal(echo?.example, 'echo "a"');
+});
+
+test("report normalizes a flag value after the equals sign but keeps the flag", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    auditEntry({ resources: ["git log --output=/tmp/a.patch"], probability: 0.4 }),
+    auditEntry({ resources: ["git log --output=/tmp/b.patch"], probability: 0.5 }),
+  ]);
+
+  const result = run(["--audit-dir", audit, "--since", "2000-01-01", "--json"], { cwd: directory });
+  assert.equal(result.status, 0, result.stderr);
+
+  assert.deepEqual(
+    parseReport(result).clusters.map((cluster) => [cluster.signature, cluster.occurrences]),
+    [["git log --output=<path>", 2]],
+  );
 });
 
 test("report text and JSON are stable and keep the documented field order", (t) => {
@@ -465,6 +571,11 @@ test("report excludes sandbox audit unless --include-sandbox is explicit", (t) =
 
   assert.equal(isSandboxPath(join(REPO_ROOT, "sandbox"), REPO_ROOT), true);
   assert.equal(isSandboxPath(join(REPO_ROOT, "sandbox", "audit"), REPO_ROOT), true);
+  assert.equal(isSandboxPath(join(REPO_ROOT, "sandbox-runtime"), REPO_ROOT), true);
+  assert.equal(isSandboxPath(join(REPO_ROOT, "sandbox-runtime", "audit"), REPO_ROOT), true);
+  assert.equal(isSandboxPath("/sandbox-runtime", REPO_ROOT), true);
+  assert.equal(isSandboxPath("/sandbox-runtime/audit", REPO_ROOT), true);
+  assert.equal(isSandboxPath("/sandbox-runtime-other", REPO_ROOT), false);
   assert.equal(isSandboxPath(join(REPO_ROOT, "sandbox-other"), REPO_ROOT), false);
   assert.equal(isSandboxPath(join(REPO_ROOT, "src"), REPO_ROOT), false);
 

@@ -166,7 +166,7 @@ test("assigns every cluster to exactly one lever, including mixed sources", (t) 
   }
 
   assert.equal(assigned.size, report.clusters.length);
-  assert.equal(assigned.get("cat secrets.txt"), "allowlist-and-guards");
+  assert.equal(assigned.get("cat <path>"), "allowlist-and-guards");
   assert.equal(assigned.get("gh issue view <n>"), "allowlist-and-guards");
   assert.equal(assigned.get("npm test"), "model-and-threshold");
   assert.equal(assigned.get("docker ps"), "model-and-threshold");
@@ -238,23 +238,24 @@ test("never recommends allowlisting around secret, outside-cwd or write guards",
   const directory = scratch(t);
   const audit = join(directory, "audit");
   writeLines(audit, "evaluate-2026-10.jsonl", [
+    // Paths normalize to one shape, so each guarded case needs its own program to stay separate.
     ...ask(["cat .env"], 3, { source: "allowlist", rule: "guard:secret-env", probability: null }),
-    ...ask(["cat ../notes.txt"], 3, { source: "allowlist", rule: "guard:outside-cwd", probability: null }),
-    ...ask(["cat data.txt"], 3, { source: "allowlist", rule: "guard:redirect", probability: null }),
+    ...ask(["head ../notes.txt"], 3, { source: "allowlist", rule: "guard:outside-cwd", probability: null }),
+    ...ask(["wc data.txt"], 3, { source: "allowlist", rule: "guard:redirect", probability: null }),
     ...ask(['rg "a|b"'], 3, { source: "allowlist", rule: "guard:shell-metacharacter", probability: null }),
   ]);
 
   const report = analyze(directory, audit);
   const recommended = report.recommendations.map((item) => item.signature);
 
-  for (const signature of ["cat .env", "cat ../notes.txt", "cat data.txt"]) {
+  for (const signature of ["cat <path>", "head <path>", "wc <path>"]) {
     assert.equal(recommended.includes(signature), false, `${signature} must stay denied by the guard`);
     const observation = report.observations.find((item) => item.signature === signature);
     assert.match(observation?.note ?? "", /оставить/);
   }
 
   // The deliberately noisy metacharacter guard is the one false-positive candidate.
-  assert.equal(recommended.includes('rg "a|b"'), true);
+  assert.equal(recommended.includes("rg <text>"), true);
 });
 
 test("refuses every recommendation when a raw command hides active shell syntax", (t) => {
@@ -287,10 +288,10 @@ test("refuses every recommendation when a raw command hides active shell syntax"
 
   const report = analyze(directory, audit);
   const active = [
-    "cat notes.txt rm -rf /tmp/x",
-    "gh issue view <n> rm -rf /tmp/x",
-    "gh pr view <n> rm -rf /tmp/x",
-    "npm test rm -rf /tmp/x",
+    "cat <path> rm -rf <path>",
+    "gh issue view <n> rm -rf <path>",
+    "gh pr view <n> rm -rf <path>",
+    "npm test rm -rf <path>",
   ];
 
   for (const signature of active) {
@@ -301,14 +302,14 @@ test("refuses every recommendation when a raw command hides active shell syntax"
   }
 
   // The raw newline survives into the example a human reads.
-  const hidden = report.clusters.find((item) => item.signature === "gh issue view <n> rm -rf /tmp/x");
+  const hidden = report.clusters.find((item) => item.signature === "gh issue view <n> rm -rf <path>");
   assert.match(hidden?.example ?? "", /\nrm -rf \/tmp\/x$/);
 
-  const guardNote = report.observations.find((item) => item.signature === "cat notes.txt rm -rf /tmp/x")?.note ?? "";
+  const guardNote = report.observations.find((item) => item.signature === "cat <path> rm -rf <path>")?.note ?? "";
   assert.match(guardNote, /активный shell-синтаксис/);
   assert.match(guardNote, /оставить/);
 
-  const defaultNote = report.observations.find((item) => item.signature === "gh issue view <n> rm -rf /tmp/x")?.note ?? "";
+  const defaultNote = report.observations.find((item) => item.signature === "gh issue view <n> rm -rf <path>")?.note ?? "";
   assert.match(defaultNote, /активный shell-синтаксис/);
 
   const control = report.clusters.find((item) => item.signature === "gh issue view <n>");
@@ -327,10 +328,12 @@ test("keeps the quoted-metacharacter false positive actionable", (t) => {
   ]);
 
   const report = analyze(directory, audit);
-  const cluster = report.clusters.find((item) => item.signature === 'echo "a;b"');
+  const cluster = report.clusters.find((item) => item.signature === "echo <text>");
   assert.equal(cluster?.activeSyntax, false);
+  // The quoted contents are data; the raw example still shows them for the human.
+  assert.equal(cluster?.example, 'echo "a;b"');
 
-  const recommendation = report.recommendations.find((item) => item.signature === 'echo "a;b"');
+  const recommendation = report.recommendations.find((item) => item.signature === "echo <text>");
   assert.equal(recommendation?.kind, "allowlist-expansion");
 });
 
