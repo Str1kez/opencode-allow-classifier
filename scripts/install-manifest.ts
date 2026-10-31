@@ -5,14 +5,30 @@
  * pre-install state, so every successful write leaves one manifest outside the repo, keyed by the
  * absolute config path. The manifest stores the target config text (the file the owner already has)
  * plus the applied edits, never unrelated secrets.
+ *
+ * That config text can still contain provider credentials, so the manifest is sensitive: it lives in
+ * a 0o700 directory as a 0o600 file and is replaced atomically (temp file, then rename) so a crash
+ * never leaves half-written JSON behind.
  */
 
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { JsoncEdit } from "./jsonc.ts";
 import type { MergeAdditions } from "./merge.ts";
+
+const DIRECTORY_MODE = 0o700;
+const FILE_MODE = 0o600;
 
 export interface ManifestEdit {
   /** Start offset in the pre-install text. */
@@ -75,6 +91,7 @@ export function readManifest(
 
   let parsed: unknown;
   try {
+    tightenPermissions(path);
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
     throw new Error(`cannot read install manifest ${path}: ${errorMessage(error)}`);
@@ -84,8 +101,23 @@ export function readManifest(
 
 export function writeManifest(manifest: InstallManifest, env: NodeJS.ProcessEnv = process.env): void {
   const path = manifestPathFor(manifest.configPath, env);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: DIRECTORY_MODE });
+  tightenPermissions(path);
+
+  const temp = join(directory, `.${basename(path)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  try {
+    writeFileSync(temp, `${JSON.stringify(manifest, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: FILE_MODE,
+    });
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+  chmodSync(path, FILE_MODE);
 }
 
 export function removeManifest(configPath: string, env: NodeJS.ProcessEnv = process.env): void {
@@ -96,6 +128,12 @@ function stateHome(env: NodeJS.ProcessEnv): string {
   const configured = env.XDG_STATE_HOME;
   if (configured !== undefined && configured.length > 0) return resolve(configured);
   return join(env.HOME ?? homedir(), ".local", "state");
+}
+
+function tightenPermissions(path: string): void {
+  chmodSync(dirname(path), DIRECTORY_MODE);
+  if (!existsSync(path)) return;
+  if (statSync(path).isFile()) chmodSync(path, FILE_MODE);
 }
 
 function validateManifest(value: unknown, configPath: string, path: string): InstallManifest {

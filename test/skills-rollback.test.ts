@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { manifestPathFor } from "../scripts/install-manifest.ts";
+import { manifestPathFor, readManifest } from "../scripts/install-manifest.ts";
 import { cleanConfigText } from "../scripts/layout.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -346,6 +356,69 @@ test("install-state stays under the temp state dir, never the real home", (t) =>
 
   const realHomeManifest = manifestPathFor(config, { ...process.env, XDG_STATE_HOME: "" });
   assert.equal(existsSync(realHomeManifest), false);
+});
+
+test("install-state directory and manifest are private", (t) => {
+  if (process.platform === "win32") return t.skip("POSIX permissions only");
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+
+  assert.equal(run(["install", "--config", config], { cwd: directory }).status, 0);
+  const manifest = manifestPath(config, directory);
+
+  assert.equal(statSync(dirname(manifest)).mode & 0o777, 0o700);
+  assert.equal(statSync(manifest).mode & 0o777, 0o600);
+});
+
+test("install tightens an existing loose install-state directory", (t) => {
+  if (process.platform === "win32") return t.skip("POSIX permissions only");
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  const manifest = manifestPath(config, directory);
+  mkdirSync(dirname(manifest), { recursive: true, mode: 0o755 });
+  chmodSync(dirname(manifest), 0o755);
+
+  assert.equal(run(["install", "--config", config], { cwd: directory }).status, 0);
+
+  chmodSync(dirname(manifest), 0o755);
+  chmodSync(manifest, 0o644);
+  assert.ok(readManifest(config, { XDG_STATE_HOME: join(directory, "state") }));
+
+  assert.equal(statSync(dirname(manifest)).mode & 0o777, 0o700);
+  assert.equal(statSync(manifest).mode & 0o777, 0o600);
+});
+
+test("a corrupt install manifest fails clearly without touching the config", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  const original = `{\n  "model": "provider/model"\n}\n`;
+  writeFileSync(config, original);
+  const manifest = manifestPath(config, directory);
+  mkdirSync(dirname(manifest), { recursive: true });
+  writeFileSync(manifest, `{"version": 1,`);
+
+  const rolled = run(["rollback", "--config", config], { cwd: directory });
+
+  assert.equal(rolled.status, 1);
+  assert.match(rolled.stderr, /cannot read install manifest/);
+  assert.doesNotMatch(rolled.stderr, /^\s+at /m);
+  assert.equal(readFileSync(config, "utf8"), original);
+});
+
+test("a manifest write failure leaves no temp file behind", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  const manifest = manifestPath(config, directory);
+  mkdirSync(dirname(manifest), { recursive: true });
+  mkdirSync(manifest);
+
+  const installed = run(["install", "--config", config], { cwd: directory });
+
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.match(installed.stderr, /warning: install manifest could not be written/);
+  const leftovers = readdirSync(dirname(manifest)).filter((name) => name.endsWith(".tmp"));
+  assert.deepEqual(leftovers, []);
+  assert.equal(readdirSync(dirname(manifest)).includes(basename(manifest)), true);
 });
 
 test("inspect and verify never create an install manifest", (t) => {
