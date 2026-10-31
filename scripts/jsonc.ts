@@ -376,12 +376,74 @@ export function applyEdits(text: string, edits: readonly JsoncEdit[]): string {
 
 /** Appends a member before the closing brace. `memberText` is `"key": value`. */
 export function insertObjectMember(document: JsoncDocument, object: JsoncObjectNode, memberText: string): JsoncEdit {
-  return insertIntoContainer(document.text, object, object.members, memberText, object.end - 1);
+  return insertObjectMembers(document, object, [memberText]);
+}
+
+/** Appends several members in one edit, so an empty object stays valid. */
+export function insertObjectMembers(
+  document: JsoncDocument,
+  object: JsoncObjectNode,
+  memberTexts: readonly string[],
+): JsoncEdit {
+  requireElements(memberTexts);
+  const multiline =
+    document.text.slice(object.start, object.end).includes("\n") ||
+    memberTexts.length > 1 ||
+    memberTexts.some((memberText) => memberText.includes("\n"));
+  const indent = containerChildIndent(document.text, object.start, object.members);
+  const joined = memberTexts.join(multiline ? `,\n${indent}` : ", ");
+  return insertIntoContainer(document.text, object, object.members, joined, object.end - 1);
 }
 
 /** Appends an item before the closing bracket. */
 export function insertArrayItem(document: JsoncDocument, array: JsoncArrayNode, itemText: string): JsoncEdit {
-  return insertIntoContainer(document.text, array, array.items, itemText, array.end - 1);
+  return insertArrayItems(document, array, array.items.length, [itemText]);
+}
+
+/**
+ * Inserts items before the item at `index`. `index === array.items.length` appends, which also
+ * covers an empty array.
+ */
+export function insertArrayItems(
+  document: JsoncDocument,
+  array: JsoncArrayNode,
+  index: number,
+  itemTexts: readonly string[],
+): JsoncEdit {
+  requireElements(itemTexts);
+  if (!Number.isInteger(index) || index < 0 || index > array.items.length) {
+    throw new RangeError(`array insert index out of bounds: ${index}`);
+  }
+
+  const target = array.items[index];
+  if (target !== undefined) {
+    const multiline = document.text.slice(array.start, target.start).includes("\n");
+    if (!multiline) return { start: target.start, end: target.start, text: `${itemTexts.join(", ")}, ` };
+
+    const indent = lineIndent(document.text, target.start);
+    return { start: target.start, end: target.start, text: `${itemTexts.join(`,\n${indent}`)},\n${indent}` };
+  }
+
+  const multiline =
+    array.items.length === 0 ||
+    document.text.slice(array.start, array.end).includes("\n") ||
+    itemTexts.some((itemText) => itemText.includes("\n"));
+  const indent = containerChildIndent(document.text, array.start, array.items);
+  const joined = itemTexts.join(multiline ? `,\n${indent}` : ", ");
+  return insertIntoContainer(document.text, array, array.items, joined, array.end - 1);
+}
+
+function requireElements(texts: readonly string[]): void {
+  if (texts.length === 0) throw new Error("nothing to insert");
+}
+
+function containerChildIndent(
+  text: string,
+  containerStart: number,
+  elements: readonly ContainerElement[],
+): string {
+  const last = elements[elements.length - 1];
+  return last === undefined ? `${lineIndent(text, containerStart)}  ` : lineIndent(text, last.start);
 }
 
 interface ContainerElement {
@@ -407,7 +469,10 @@ function insertIntoContainer(
       return {
         start: container.start + 1,
         end: close,
-        text: multiline ? `\n${childIndent}${elementText}\n${containerIndent}` : ` ${elementText} `,
+        text:
+          multiline || elementText.includes("\n")
+            ? `\n${childIndent}${elementText}\n${containerIndent}`
+            : ` ${elementText} `,
       };
     }
     return {
@@ -438,7 +503,7 @@ function insertIntoContainer(
   return { start: last.end, end: last.end, text: `,\n${elementIndent}${elementText}` };
 }
 
-function lineIndent(text: string, offset: number): string {
+export function lineIndent(text: string, offset: number): string {
   const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
   return /^[ \t]*/.exec(text.slice(lineStart, offset))![0];
 }

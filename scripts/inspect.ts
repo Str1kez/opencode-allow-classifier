@@ -1,10 +1,8 @@
 import { findDuplicateKeys, lastMember, parseJsonc } from "./jsonc.ts";
 import type { JsoncNode, JsoncObjectNode, JsoncScalarNode } from "./jsonc.ts";
-import { CATCH_ALL_RULE, DENY_RULES } from "./layout.ts";
+import { CATCH_ALL_RULE, DENY_RULES, isPackageReference } from "./layout.ts";
 
 type JsoncStringNode = JsoncScalarNode & { readonly type: "string"; readonly value: string };
-
-const PACKAGE_NAME = "@str1kez/opencode-allow-classifier";
 
 export interface RuleReport {
   readonly index: number;
@@ -277,10 +275,6 @@ function referencesPackage(entry: JsoncNode, packageRoot: string): entry is Json
 
   const packageName = readString(entry, "package");
   return packageName !== null && isPackageReference(packageName, packageRoot);
-}
-
-function isPackageReference(value: string, packageRoot: string): boolean {
-  return value === packageRoot || value === PACKAGE_NAME;
 }
 
 function readEnabled(options: JsoncObjectNode | null, warnings: string[]): boolean | null {

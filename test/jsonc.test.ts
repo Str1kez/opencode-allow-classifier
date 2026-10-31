@@ -4,7 +4,9 @@ import {
   applyEdits,
   findDuplicateKeys,
   insertArrayItem,
+  insertArrayItems,
   insertObjectMember,
+  insertObjectMembers,
   parseJsonc,
   replaceNode,
   toValue,
@@ -90,6 +92,44 @@ test("jsonc edits insert into objects and arrays without rewriting comments or f
 }
 `,
   );
+});
+
+test("jsonc inserts array items before an existing item", () => {
+  const text = `{
+  "rules": [
+    { "name": "first" },
+    { "name": "second" }
+  ]
+}
+`;
+  const document = parseJsonc(text);
+  const rules = (document.root as JsoncObjectNode).members[0]!.value as JsoncArrayNode;
+
+  const result = applyEdits(text, [insertArrayItems(document, rules, 0, ['{ "name": "catch-all" }'])]);
+
+  assert.equal(
+    result,
+    `{
+  "rules": [
+    { "name": "catch-all" },
+    { "name": "first" },
+    { "name": "second" }
+  ]
+}
+`,
+  );
+});
+
+test("jsonc inserts several members into an empty object", () => {
+  const document = parseJsonc("{}");
+  const root = document.root as JsoncObjectNode;
+
+  const result = applyEdits("{}", [insertObjectMembers(document, root, ['"a": 1', '"b": 2'])]);
+
+  assert.equal(result, `{
+  "a": 1,
+  "b": 2
+}`);
 });
 
 test("jsonc reports duplicate keys but keeps the last value", () => {

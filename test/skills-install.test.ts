@@ -107,7 +107,7 @@ test("install is an idempotent no-op on a commented config with trailing commas"
   assert.equal(readFileSync(config, "utf8"), before);
 });
 
-test("install refuses to rewrite a foreign config and leaves it byte-identical", (t) => {
+test("install merges a valid foreign config and keeps the owner's settings", (t) => {
   const directory = scratch(t);
   const config = join(directory, "opencode.jsonc");
   const foreign = `{
@@ -120,10 +120,13 @@ test("install refuses to rewrite a foreign config and leaves it byte-identical",
 
   const result = run(["install", "--config", config], { cwd: directory });
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /not the clean classifier layout/);
-  assert.match(result.stderr, /file left unchanged/);
-  assert.equal(readFileSync(config, "utf8"), foreign);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /merged/);
+  const text = readFileSync(config, "utf8");
+  assert.match(text, /\/\/ my own settings/);
+  assert.match(text, /"model": "provider\/model"/);
+  assert.match(text, /\{ "action": "shell", "resource": "ls\*", "effect": "allow" \}/);
+  assert.match(text, /"resource": "\*", "effect": "ask"/);
 });
 
 test("install refuses to rewrite invalid JSONC and leaves it byte-identical", (t) => {
