@@ -26,6 +26,8 @@ export interface PluginReport {
   readonly package: string | null;
   readonly packageMatches: boolean;
   readonly options: OptionsReport;
+  /** Non-empty `audit_dir` plugin option, or `null` when the default state directory applies. */
+  readonly auditDir: string | null;
   readonly killSwitch: "enabled" | "disabled" | "unknown";
   readonly enabled: boolean | null;
 }
@@ -235,6 +237,7 @@ function readPlugin(root: JsoncObjectNode, packageRoot: string, warnings: string
       package: entry.value,
       packageMatches: true,
       options: { present: false, type: "missing" },
+      auditDir: null,
       killSwitch: "unknown",
       enabled: null,
     };
@@ -252,7 +255,8 @@ function readPlugin(root: JsoncObjectNode, packageRoot: string, warnings: string
     warnings.push("plugin options is not an object");
   }
 
-  const enabled = readEnabled(optionsMember?.value.type === "object" ? optionsMember.value : null, warnings);
+  const optionsObject = optionsMember?.value.type === "object" ? optionsMember.value : null;
+  const enabled = readEnabled(optionsObject, warnings);
   const killSwitch = enabled === null ? "unknown" : enabled ? "enabled" : "disabled";
 
   return {
@@ -261,6 +265,7 @@ function readPlugin(root: JsoncObjectNode, packageRoot: string, warnings: string
     package: packageName,
     packageMatches: true,
     options: { present: optionsPresent, type: optionsType },
+    auditDir: readAuditDir(optionsObject),
     killSwitch,
     enabled,
   };
@@ -289,6 +294,13 @@ function readEnabled(options: JsoncObjectNode | null, warnings: string[]): boole
   return member.value.value as boolean;
 }
 
+/** The plugin ignores an empty or non-string `audit_dir` and falls back to the state directory. */
+function readAuditDir(options: JsoncObjectNode | null): string | null {
+  if (options === null) return null;
+  const value = readString(options, "audit_dir");
+  return value === null || value.length === 0 ? null : value;
+}
+
 function readString(object: JsoncObjectNode, key: string): string | null {
   const member = lastMember(object, key);
   if (member === undefined || member.value.type !== "string") return null;
@@ -302,6 +314,7 @@ function missingPlugin(): PluginReport {
     package: null,
     packageMatches: false,
     options: { present: false, type: "missing" },
+    auditDir: null,
     killSwitch: "unknown",
     enabled: null,
   };
