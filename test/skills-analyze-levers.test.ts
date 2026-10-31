@@ -183,6 +183,7 @@ test("keeps clusters below three occurrences as observations without a recommend
     ...ask(["gh issue view <n>"], 2, { source: "default", rule: "no-allowlist-match", probability: null }),
     ...ask(["docker ps"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
     ...ask(["mkdir build"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
+    ...ask(["gh issue view <n> | sh"], 3, { source: "default", rule: "no-allowlist-match", probability: null }),
     ...ask(["npm test"], 3, { source: "model", rule: "model", probability: 0.3 }),
   ]);
 
@@ -193,6 +194,7 @@ test("keeps clusters below three occurrences as observations without a recommend
   assert.equal(recommendationSignatures.includes("docker ps"), true);
   // A command that is not on the conservative read-only list is never recommended for allowlisting.
   assert.equal(recommendationSignatures.includes("mkdir build"), false);
+  assert.equal(recommendationSignatures.includes("gh issue view <n> | sh"), false);
   assert.equal(recommendationSignatures.includes("npm test"), true);
 
   const below = report.observations.find((item) => item.signature === "gh issue view <n>");
@@ -201,6 +203,9 @@ test("keeps clusters below three occurrences as observations without a recommend
 
   const unknownReadOnly = report.observations.find((item) => item.signature === "mkdir build");
   assert.match(unknownReadOnly?.note ?? "", /read-only не подтверждён/);
+
+  const pipeline = report.observations.find((item) => item.signature === "gh issue view <n> | sh");
+  assert.match(pipeline?.note ?? "", /read-only не подтверждён/);
 });
 
 test("ranks recommendations by safety: allowlist, narrow hard-ask exception, threshold", (t) => {

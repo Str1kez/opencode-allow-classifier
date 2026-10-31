@@ -7,7 +7,7 @@
  * the same clusters produce the same bytes.
  */
 import { SAFETY_THRESHOLD } from "../src/classifier.ts";
-import { programOf, tokenize } from "../src/shell.ts";
+import { programOf, shellActiveText, tokenize } from "../src/shell.ts";
 import type { ClusterReport } from "./report.ts";
 
 export const LEVERS = ["allowlist-and-guards", "model-and-threshold", "hard-ask", "classifier-errors"] as const;
@@ -433,6 +433,7 @@ function isForbiddenHardAsk(rule: string): boolean {
 
 /** Program plus subcommand match; the raw example is tokenized with the plugin's own tokenizer. */
 function isReadOnlyShape(example: string): boolean {
+  if (/[;&|`$(){}<>\\!*?\[\]\n]/.test(shellActiveText(example))) return false;
   const tokens = tokenize(example);
   for (const shape of READ_ONLY_SHAPES) {
     if (tokens.length < shape.length) continue;

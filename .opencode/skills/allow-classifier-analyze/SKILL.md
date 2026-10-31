@@ -113,7 +113,8 @@ node .opencode/skills/allow-classifier-analyze/scripts/cli.ts --since=30d
 
 Расширение allowlist предлагается только тогда, когда команда действительно
 read-only: форма не совпала с allowlist или сработал гард-ложное-срабатывание
-(`guard:shell-metacharacter`). Вокруг `guard:secret-env`, `guard:outside-cwd`,
+(`guard:shell-metacharacter`). Форма с активным shell-синтаксисом — пайпом, `;`
+или подстановкой — read-only не считается. Вокруг `guard:secret-env`, `guard:outside-cwd`,
 `guard:redirect` и других защитных гардов расширения нет: там рекомендация —
 оставить гард и не менять права. Это явно печатается в заметке кластера.
 

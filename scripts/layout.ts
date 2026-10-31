@@ -24,6 +24,13 @@ export const DENY_RULES: readonly PermissionRule[] = [
 
 export const PLUGIN_OPTIONS = { enabled: true } as const;
 
+export const PACKAGE_NAME = "@str1kez/opencode-allow-classifier";
+
+/** A config may reference the local checkout by path or the package by name. */
+export function isPackageReference(value: string, packageRoot: string): boolean {
+  return value === packageRoot || value === PACKAGE_NAME;
+}
+
 export interface PermissionRuleValue {
   readonly action: string;
   readonly resource: string;
