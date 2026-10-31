@@ -5,6 +5,8 @@ import { readOptions } from "../src/options.ts";
 import {
   isModelString,
   isThreshold,
+  isTimeoutMs,
+  MAX_TIMEOUT_MS,
   normalizeModel,
   parseModelOverride,
   resolveSettings,
@@ -147,34 +149,38 @@ test("isThreshold accepts probabilities in (0, 1] only", () => {
   }
 });
 
+test("isTimeoutMs accepts whole milliseconds in (0, MAX_TIMEOUT_MS] only", () => {
+  for (const value of [1, 3000, MAX_TIMEOUT_MS]) assert.equal(isTimeoutMs(value), true, String(value));
+  for (const value of [0, -1, 0.5, MAX_TIMEOUT_MS + 1, Number.NaN, Number.POSITIVE_INFINITY, "3000", null, undefined]) {
+    assert.equal(isTimeoutMs(value), false, String(value));
+  }
+});
+
 test("readOptions parses the config, ignoring invalid model and threshold values", () => {
   assert.deepEqual(readOptions({}), {
     enabled: true,
-    logRaw: false,
-    logDirectory: undefined,
     auditDirectory: undefined,
     model: undefined,
     threshold: undefined,
+    timeoutMs: undefined,
     includeSystemContext: false,
   });
 
   assert.deepEqual(
     readOptions({
       enabled: false,
-      log_raw: true,
-      log_dir: "/tmp/logs",
       audit_dir: "/tmp/audit",
       model: "  acme/model  ",
       threshold: 0.75,
+      timeout_ms: 1500,
       include_system_context: true,
     }),
     {
       enabled: false,
-      logRaw: true,
-      logDirectory: "/tmp/logs",
       auditDirectory: "/tmp/audit",
       model: "acme/model",
       threshold: 0.75,
+      timeoutMs: 1500,
       includeSystemContext: true,
     },
   );
@@ -187,6 +193,10 @@ test("readOptions parses the config, ignoring invalid model and threshold values
 
   for (const model of ["", "   ", "provider", "/model", "provider/", "provider/ model", 42, null, {}, []]) {
     assert.equal(readOptions({ model }).model, undefined, String(model));
+  }
+
+  for (const timeout of [0, -1, 0.5, 60_001, "3000", null]) {
+    assert.equal(readOptions({ timeout_ms: timeout }).timeoutMs, undefined, String(timeout));
   }
 });
 

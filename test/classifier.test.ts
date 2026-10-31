@@ -129,6 +129,40 @@ test("probability below 0.9 stays ask", async () => {
   assert.deepEqual(result, { ok: true, probability: 0.89, model: DEFAULT_MODEL });
 });
 
+test("the configured timeout is the total budget handed to the model", async () => {
+  const budgets: Array<number | undefined> = [];
+  const ask: AskModel = async (_model, _prompt, timeoutMs) => {
+    budgets.push(timeoutMs);
+    return ok(0.95);
+  };
+
+  const result = await classify(ask, REQUEST, DEFAULT_MODEL, 1500);
+
+  assert.equal(result.ok, true);
+  assert.equal(budgets.length, 1);
+  assert.ok(budgets[0] !== undefined && budgets[0] > 0 && budgets[0] <= 1500, String(budgets[0]));
+});
+
+test("the retry gets only the time left in the budget", async () => {
+  const budgets: Array<number | undefined> = [];
+  const ask: AskModel = async (_model, _prompt, timeoutMs) => {
+    budgets.push(timeoutMs);
+    if (budgets.length === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return providerError();
+    }
+    return ok(0.95);
+  };
+
+  const result = await classify(ask, REQUEST, DEFAULT_MODEL, 1000);
+
+  assert.equal(result.ok, true);
+  assert.equal(budgets.length, 2);
+  const [first, second] = budgets;
+  assert.ok(first !== undefined && first > 0 && first <= 1000, String(first));
+  assert.ok(second !== undefined && second > 0 && first !== undefined && second < first, String(second));
+});
+
 test("a provider failure retries once with the fallback model", async () => {
   const recorderChain = recorder(providerError(), ok(0.95));
   const result = await classify(recorderChain.ask, REQUEST);

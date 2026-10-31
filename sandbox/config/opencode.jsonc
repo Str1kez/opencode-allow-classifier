@@ -22,8 +22,7 @@
       "package": "/home/node/repo",
       "options": {
         "enabled": true,
-        "audit_dir": "/sandbox-runtime/audit",
-        "log_dir": "/sandbox-runtime/raw"
+        "audit_dir": "/sandbox-runtime/audit"
       }
     }
   ]

@@ -64,7 +64,7 @@ System-смоук: включи `"include_system_context": true` в
 её (`opencode run --session <id>`). OpenCode пришлёт system-сообщение с diff,
 а аудит запишет `systemContext.used: true`, длину и хеш — без текста.
 
-Аудит и сырые логи пишутся в `sandbox/.runtime/` на хосте:
+Аудит пишется в `sandbox/.runtime/` на хосте:
 
 ```sh
 tail -f sandbox/.runtime/audit/evaluate-*.jsonl

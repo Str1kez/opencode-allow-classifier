@@ -19,7 +19,7 @@ services:
       - opencode-config:/home/node/.config/opencode
       - opencode-data:/home/node/.local/share/opencode
       - opencode-cache:/home/node/.cache/opencode
-      # Audit and raw logs land here so the host agent can read them directly.
+      # Audit logs land here so the host agent can read them directly.
       - ./.runtime:/sandbox-runtime
     tty: true
 

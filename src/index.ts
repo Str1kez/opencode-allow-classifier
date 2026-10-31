@@ -17,7 +17,6 @@ import {
   type SessionFacts,
   type SessionSnapshot,
 } from "./pipeline.ts";
-import { openRawEventLog, type RawEventLog } from "./raw-log.ts";
 import { ClassifierRpc, type ClassifierConfig } from "./rpc.ts";
 import {
   MAX_MODEL_LENGTH,
@@ -39,18 +38,6 @@ function realPath(path: string): string | undefined {
   try {
     return realpathSync.native(path);
   } catch {
-    return undefined;
-  }
-}
-
-function startRawEventLog(options: ClassifierOptions): RawEventLog | undefined {
-  if (!options.logRaw) return undefined;
-
-  try {
-    return openRawEventLog(options.logDirectory ?? openCodeStateDirectory());
-  } catch {
-    // Diagnostics must never cost the user a working plugin: if the directory is unwritable the hook simply
-    // stays silent and permission handling continues untouched.
     return undefined;
   }
 }
@@ -229,7 +216,6 @@ export const ServerPlugin = Plugin.define({
         ),
       );
 
-      const rawLog = startRawEventLog(options);
       const audit = openAuditLog(options.auditDirectory ?? openCodeStateDirectory());
       const writeAudit = createAuditWriter(audit);
       const cwd = ctx.location.directory;
@@ -237,7 +223,6 @@ export const ServerPlugin = Plugin.define({
 
       yield* ctx.permission.hook("evaluate", (evaluation) =>
         Effect.promise(async () => {
-          rawLog?.write(evaluation);
           if (evaluation.action !== "shell" || evaluation.effect !== "ask") return;
 
           let facts: SessionFacts = { task: null, system: UNUSED_SYSTEM_CONTEXT };
@@ -255,6 +240,7 @@ export const ServerPlugin = Plugin.define({
             ask,
             model: settings.model,
             threshold: settings.threshold,
+            timeoutMs: options.timeoutMs,
             realpath: realPath,
             includeSystemContext: options.includeSystemContext,
           });

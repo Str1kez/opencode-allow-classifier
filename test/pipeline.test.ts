@@ -88,6 +88,23 @@ test("the configured threshold moves the allow boundary", async () => {
   assert.equal(allowed.source, "model");
 });
 
+test("the configured timeout reaches the model call", async () => {
+  const budgets: Array<number | undefined> = [];
+  const ask: AskModel = async (_model, _prompt, timeoutMs) => {
+    budgets.push(timeoutMs);
+    return ok(0.95);
+  };
+
+  const decision = await evaluate(
+    { ...REQUEST, resources: ["make lint"] },
+    { ...options(ask), timeoutMs: 1500 },
+  );
+
+  assert.equal(decision.verdict, "allow");
+  assert.equal(budgets.length, 1);
+  assert.ok(budgets[0] !== undefined && budgets[0] > 0 && budgets[0] <= 1500, String(budgets[0]));
+});
+
 test("hard-ask and fired guards never reach the model", async () => {
   const unsafe = recorder(ok(0.99));
 

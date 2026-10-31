@@ -13,6 +13,12 @@ export const MODEL_OVERRIDE_KEY = "model_override";
 /** Longer than any real `provider/model` id; anything above it is junk, not a model reference. */
 export const MAX_MODEL_LENGTH = 200;
 
+/**
+ * A minute is already far beyond a usable permission prompt: the hook holds the shell call for the whole
+ * budget, so a bigger number in the config is a typo, not an intent.
+ */
+export const MAX_TIMEOUT_MS = 60_000;
+
 export const SETTING_SOURCES = ["options", "override", "default"] as const;
 
 /** Where the effective model came from. `options` wins over `override`, which wins over the default. */
@@ -55,6 +61,15 @@ export function normalizeModel(value: unknown): string | undefined {
 /** The threshold is a probability: `0` would allow nothing, values above `1` are not probabilities. */
 export function isThreshold(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 1;
+}
+
+/**
+ * The timeout is a positive whole number of milliseconds inside `(0, MAX_TIMEOUT_MS]`. Zero or a
+ * fraction is a config mistake, not a budget: zero would expire before the call starts, and a
+ * fractional budget is meaningless at permission-prompt scale.
+ */
+export function isTimeoutMs(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_TIMEOUT_MS;
 }
 
 /**

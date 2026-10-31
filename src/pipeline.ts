@@ -26,6 +26,8 @@ export interface PipelineOptions {
   /** Classifier model from the effective settings; the stock default applies when absent. */
   readonly model?: string;
   readonly threshold?: number;
+  /** Total classifier budget; the stock 3 s applies when absent. */
+  readonly timeoutMs?: number;
   readonly realpath?: RealPathResolver;
   /**
    * Send the last system message to the classifier. Off by default: system text may contain internal
@@ -124,7 +126,7 @@ export async function evaluate(input: EvaluationInput, options: PipelineOptions)
     const outcome = await options.cache.getOrCompute(
       verdictCacheKey(input.cwd, input.resources, systemContextHash),
       async () => {
-        const result = await classify(ask, request, options.model);
+        const result = await classify(ask, request, options.model, options.timeoutMs);
         if (!result.ok) throw new ClassifierError(result.failure.kind, result.model, result.failure.message);
         return { probability: result.probability, model: result.model };
       },

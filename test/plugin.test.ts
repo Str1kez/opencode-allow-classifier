@@ -68,7 +68,6 @@ interface CapturedRpc {
 
 interface Harness {
   readonly root: string;
-  readonly logFile: string;
   readonly auditDirectory: string;
   readonly hookRegistered: boolean;
   readonly rpcRegistered: boolean;
@@ -152,7 +151,6 @@ async function start(
   world: World = {},
 ): Promise<Harness> {
   const root = mkdtempSync(join(tmpdir(), "allow-classifier-"));
-  const logDirectory = join(root, "state");
   const auditDirectory = join(root, "audit");
   const modelCalls: Harness["modelCalls"] = [];
   const storage = world.storage ?? new Map<string, unknown>();
@@ -162,7 +160,7 @@ async function start(
   let sessionCalls = 0;
 
   const context = {
-    options: { log_dir: logDirectory, audit_dir: auditDirectory, ...options },
+    options: { audit_dir: auditDirectory, ...options },
     location: { directory: cwd },
     storage: {
       get: (key: string) => {
@@ -233,7 +231,6 @@ async function start(
 
   return {
     root,
-    logFile: join(logDirectory, "evaluate-raw.jsonl"),
     auditDirectory,
     hookRegistered: registered !== undefined,
     rpcRegistered: rpc !== undefined,
@@ -285,35 +282,6 @@ async function verdict(harness: Harness, resources: ReadonlyArray<string>): Prom
 test("plugin exports a server definition with an id and an effect", () => {
   assert.equal(ServerPlugin.id, "str1kez.allow-classifier");
   assert.equal(typeof ServerPlugin.effect, "function");
-});
-
-test("log_raw writes every evaluation as one JSONL line", async () => {
-  const harness = await start({ log_raw: true });
-  try {
-    await harness.evaluate(evaluation({ resources: ["find . -exec grep -l x {} +"] }));
-
-    const lines = readFileSync(harness.logFile, "utf8").trimEnd().split("\n");
-    assert.equal(lines.length, 1);
-    assert.deepEqual(JSON.parse(lines[0]!), {
-      sessionID: "ses_test",
-      action: "shell",
-      resources: ["find . -exec grep -l x {} +"],
-      effect: "ask",
-    });
-  } finally {
-    harness.dispose();
-  }
-});
-
-test("log_raw disabled creates no log file and writes no events", async () => {
-  const harness = await start({ log_raw: false });
-  try {
-    await harness.evaluate(evaluation());
-    assert.equal(existsSync(harness.logFile), false);
-    assert.equal(existsSync(join(harness.root, "state")), false);
-  } finally {
-    harness.dispose();
-  }
 });
 
 test("allowlist allows every read-only command without touching its arguments", async () => {
@@ -1034,38 +1002,6 @@ test("rm through an unexpanded variable still asks", async () => {
   const harness = await start();
   try {
     assert.equal(await verdict(harness, ["rm -rf $HOME/x"]), "ask");
-  } finally {
-    harness.dispose();
-  }
-});
-
-test("enabled: false with log_raw writes neither raw nor audit files", async () => {
-  const harness = await start({ enabled: false, log_raw: true });
-  try {
-    assert.equal(harness.hookRegistered, false);
-    assert.equal(existsSync(join(harness.root, "state")), false);
-    assert.equal(existsSync(join(harness.root, "audit")), false);
-  } finally {
-    harness.dispose();
-  }
-});
-
-test("log_raw records non-shell and compound events verbatim", async () => {
-  const harness = await start({ log_raw: true });
-  try {
-    await harness.evaluate(evaluation({ action: "read", resources: ["src/index.ts"] }));
-    assert.deepEqual(harness.auditEntries(), []);
-
-    await harness.evaluate(evaluation({ resources: ["git status", "cat .env"] }));
-
-    const lines = readFileSync(harness.logFile, "utf8")
-      .trimEnd()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    assert.equal(lines.length, 2);
-    assert.deepEqual(lines[0], { sessionID: "ses_test", action: "read", resources: ["src/index.ts"], effect: "ask" });
-    assert.equal(lines[1]?.["action"], "shell");
-    assert.deepEqual(lines[1]?.["resources"], ["git status", "cat .env"]);
   } finally {
     harness.dispose();
   }

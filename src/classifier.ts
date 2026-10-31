@@ -128,9 +128,9 @@ export function buildPrompt(request: ClassificationRequest): string {
 }
 
 /**
- * Two attempts at most, inside one 3 s budget: the retry gets whatever time the first attempt left,
- * so a hanging provider costs one timeout, not two. The configured model runs first; a provider
- * failure gets one retry with the paid model, because a different model may answer. Any other
+ * Two attempts at most, inside one configured budget (3 s by default): the retry gets whatever time the
+ * first attempt left, so a hanging provider costs one timeout, not two. The configured model runs
+ * first; a provider failure gets one retry with the paid model, because a different model may answer. Any other
  * failure is final, and the model that produced the last answer is reported so the audit explains
  * which call actually decided.
  */
@@ -138,9 +138,10 @@ export async function classify(
   ask: AskModel,
   request: ClassificationRequest,
   primaryModel: string = DEFAULT_MODEL,
+  timeoutMs: number = CLASSIFIER_TIMEOUT_MS,
 ): Promise<ClassificationResult> {
   const prompt = buildPrompt(request);
-  const deadline = Date.now() + CLASSIFIER_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
 
   async function attempt(model: string): Promise<ModelAnswer> {
     const remaining = deadline - Date.now();
