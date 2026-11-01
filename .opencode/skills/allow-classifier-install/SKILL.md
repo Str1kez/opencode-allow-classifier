@@ -171,6 +171,9 @@ node .opencode/skills/allow-classifier-install/scripts/cli.ts verify --deps-root
   объект — `PASS`;
 - kill switch: `enabled: false` — `FAIL`, отсутствующие опции или неизвестное
   значение — `WARN` (плагин по умолчанию включён), `enabled: true` — `PASS`;
+- политика: нет shell catch-all `ask`, нет `external_directory * → ask` или
+  обязательный deny заменён другим эффектом — `FAIL`; `external_directory * →
+  deny` или мёртвое узкое исключение до catch-all — `WARN`;
 - версия харнесса: `--harness-version` подменяет пробу, иначе один вызов
   `opencode --version`; 2.2.x — `PASS`, другая версия, отсутствующий бинарь или
   нечитаемый вывод — `WARN` и на код возврата не влияют;
