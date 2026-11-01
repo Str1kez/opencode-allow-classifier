@@ -87,8 +87,8 @@ test("verify passes a clean config, the supported harness and the package depend
   assert.doesNotMatch(result.stdout, /FAIL/);
 
   assert.match(result.stdout, /PASS sudo -n true -> ask \/ hard-ask \/ sudo/);
-  assert.match(result.stdout, /PASS cat \.env -> ask \/ allowlist \/ guard:secret-env/);
-  assert.match(result.stdout, /PASS cat \.\.\/secret\.txt -> ask \/ allowlist \/ guard:outside-cwd/);
+  assert.match(result.stdout, /PASS cat \.env -> ask \/ guard \/ guard:secret-env/);
+  assert.match(result.stdout, /PASS cat \.\.\/secret\.txt -> ask \/ guard \/ guard:outside-cwd/);
   assert.match(result.stdout, /PASS ls -> allow \/ allowlist \/ ls/);
 });
 

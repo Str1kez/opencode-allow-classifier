@@ -774,6 +774,56 @@ test("a compound call is allowed only when every resource is allowed", async () 
   }
 });
 
+test("a guard owns the verdict for every segment regardless of order", async () => {
+  // The model would allow everything here: only a guard that runs before the allowlist keeps this an ask.
+  const harness = await start({}, CWD, { probability: 0.99 });
+  const cases: ReadonlyArray<ReadonlyArray<string>> = [
+    ["python3 -c 'print(1)'", "cat ~/.ssh/id_rsa"],
+    ["cat ~/.ssh/id_rsa", "python3 -c 'print(1)'"],
+  ];
+
+  try {
+    for (const resources of cases) {
+      const input = evaluation({ resources });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${resources.join(" ; ")} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "guard", rule: "guard:secret-ssh" },
+        resources.join(" ; "),
+      );
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "a fired guard must never reach the model");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("a write redirect asks even when its program is unknown", async () => {
+  const harness = await start({}, CWD, { probability: 0.99 });
+  const cases = ["cmd 2> err.log", "python3 -c 'print(1)' 2> err.log"];
+
+  try {
+    for (const command of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "guard", rule: "guard:redirect" },
+        command,
+      );
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "the redirect guard must not pay for a model call");
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("the spec verdict table holds", async () => {
   const harness = await start();
   const table: ReadonlyArray<readonly [string, "allow" | "ask"]> = [

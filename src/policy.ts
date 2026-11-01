@@ -24,14 +24,17 @@ import {
 export type Verdict = "allow" | "ask";
 
 /**
- * Which stage produced the verdict. `cache` and `model` are unused until the classifier slice; they are
- * part of the contract now so the audit reader does not have to learn a second vocabulary later.
- * `default` marks the fall-through that asks the human because no rule matched yet.
+ * Which stage produced the verdict. `guard` is a deterministic `ask` that no allowlist entry can
+ * raise; `default` marks the fall-through that asks the human because no rule matched yet.
+ *
+ * Historical records with `source: "allowlist"` and `rule: "guard:*"` are still valid: before the
+ * reorder the guard could only fire on a segment that had already matched the allowlist. The report
+ * reads both spellings, and the type keeps only the current one so new code cannot emit the old one.
  *
  * The runtime list and the type come from one place: the report must not keep a second copy of the
  * source vocabulary.
  */
-export const DECISION_SOURCES = ["hard-ask", "allowlist", "default", "cache", "model", "error"] as const;
+export const DECISION_SOURCES = ["hard-ask", "guard", "allowlist", "default", "cache", "model", "error"] as const;
 export type DecisionSource = (typeof DECISION_SOURCES)[number];
 
 export interface Decision {
@@ -479,8 +482,10 @@ function finish(decision: Omit<Decision, "latency">, started: number): Decision 
  * are blanked (see `stripStreamRedirects`) because they write no file, so `2>&1` cannot turn a
  * read-only command into an asked write. The audit keeps the resource as typed.
  *
- * Hard-ask anywhere wins; otherwise every resource must pass the same two gates — an allowlist entry
- * and the secret/write guard — or the whole call asks.
+ * The order is fixed and walked over every segment before the next stage starts: hard-ask → guard →
+ * allowlist → default `ask`. A guard must not depend on the allowlist having recognised the program:
+ * otherwise `python3 -c … ; cat ~/.ssh/id_rsa` reaches the model while the reversed order is caught,
+ * and adding one unknown word to a compound disarms the deterministic protection.
  *
  * `realpath` is only used to see through symlinks; without it the path guards compare strings.
  */
@@ -503,20 +508,22 @@ export function decide(
     }
   }
 
+  for (const segment of segments) {
+    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, segment, cwd, realpath));
+    if (guard !== undefined) {
+      return finish(
+        { verdict: "ask", source: "guard", rule: `guard:${guard.name}`, probability: null, model: null },
+        started,
+      );
+    }
+  }
+
   const allowlistRules: string[] = [];
 
   for (const segment of segments) {
     const rule = ALLOWLIST_RULES.find((candidate) => matchesAllowlist(candidate, segment.tokens));
     if (rule === undefined) {
       return finish({ verdict: "ask", source: "default", rule: "no-allowlist-match", probability: null, model: null }, started);
-    }
-
-    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, segment, cwd, realpath));
-    if (guard !== undefined) {
-      return finish(
-        { verdict: "ask", source: "allowlist", rule: `guard:${guard.name}`, probability: null, model: null },
-        started,
-      );
     }
 
     if (!allowlistRules.includes(rule.name)) allowlistRules.push(rule.name);

@@ -31,8 +31,8 @@ interface DryRunCase {
  */
 const DRY_RUN_CASES: readonly DryRunCase[] = [
   { command: "sudo -n true", verdict: "ask", source: "hard-ask", rule: "sudo" },
-  { command: "cat .env", verdict: "ask", source: "allowlist", rule: "guard:secret-env" },
-  { command: "cat ../secret.txt", verdict: "ask", source: "allowlist", rule: "guard:outside-cwd" },
+  { command: "cat .env", verdict: "ask", source: "guard", rule: "guard:secret-env" },
+  { command: "cat ../secret.txt", verdict: "ask", source: "guard", rule: "guard:outside-cwd" },
   { command: "ls", verdict: "allow", source: "allowlist", rule: "ls" },
 ];
 

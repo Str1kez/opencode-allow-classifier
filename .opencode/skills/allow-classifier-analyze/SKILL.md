@@ -53,7 +53,7 @@ node .opencode/skills/allow-classifier-analyze/scripts/cli.ts --since=30d
 | `--since` | `YYYY-MM-DD` или `<n>d`; по умолчанию `30d`. `<n>d` — с UTC-полуночи дня, отстоящего на n дней назад; `0d` — с сегодняшней UTC-полуночи. |
 | `--config` | Конфиг, из которого берутся `audit_dir` и `threshold`. Отсутствие файла или ошибка разбора — код `1`. |
 | `--audit-dir` | Каталог аудита. Побеждает `audit_dir` из конфига; `threshold` по-прежнему берётся из конфига, иначе дефолт `0.9`. |
-| `--source` | Точное имя источника (`model`, `allowlist`, `hard-ask`, `default`, `cache`, `error`). Повторяемая или через запятую. |
+| `--source` | Точное имя источника (`model`, `guard`, `allowlist`, `hard-ask`, `default`, `cache`, `error`). Повторяемая или через запятую. |
 | `--rule` | Глоб с `*` по имени правила. Повторяемая. Матчится любое правило из строки через запятую. |
 | `--json` | Стабильный JSON вместо текста. |
 | `--include-sandbox` | Читать аудит песочницы: `<repo>/sandbox`, `<repo>/sandbox-runtime` или `/sandbox-runtime`. По умолчанию он исключён. |
@@ -104,10 +104,12 @@ node .opencode/skills/allow-classifier-analyze/scripts/cli.ts --since=30d
    попадает никогда.
 2. `hard-ask` → `hard-ask`. Детерминированное правило не зависит от порога и
    allowlist, поэтому оно и есть рычаг.
-3. `allowlist` или `default` → `allowlist-and-guards`.
+3. `guard`, `allowlist` или `default` → `allowlist-and-guards`.
 4. `model` или `cache` → `model-and-threshold`.
 
 Неизвестный источник считается ошибкой и уходит в `classifier-errors`.
+Старые записи с `source: allowlist` и `rule: guard:*` читаются как раньше —
+источник не менял рычаг, только подпись решения.
 
 Рекомендация появляется только при трёх и более вхождениях. Кластер с одним или
 двумя вхождениями — наблюдение (`observations`), без рекомендации: это шум, а не
@@ -125,8 +127,12 @@ node .opencode/skills/allow-classifier-analyze/scripts/cli.ts --since=30d
 3. `threshold-lowering` — понижение порога.
 
 Расширение allowlist предлагается только тогда, когда команда действительно
-read-only: форма не совпала с allowlist или сработал гард-ложное-срабатывание
-(`guard:shell-metacharacter`). Форма с активным shell-синтаксисом — пайпом, `;`,
+read-only: форма не совпала с allowlist (`source: default`) или сработал
+гард-ложное-срабатывание на форме, которая уже была в allowlist
+(`source: allowlist`, `guard:shell-metacharacter`). Запись с `source: guard`
+без совпадения с allowlist — не доказательство read-only: гард срабатывает
+до allowlist, поэтому такая форма идёт в наблюдения, а не в рекомендации.
+Форма с активным shell-синтаксисом — пайпом, `;`,
 переводом строки или подстановкой — read-only не считается. Если `activeSyntax`
 у кластера включён, рекомендации нет ни по одному рычагу: allowlist, исключение
 из hard-ask и снижение порога одинаково пропустили бы спрятанную вторую команду.
