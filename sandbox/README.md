@@ -45,27 +45,46 @@ docker compose -f sandbox/compose.yaml run --rm -T agent npm run typecheck
 
 ## Смоук
 
-Headless-прогон без интерактива; решения видны в аудите.
+Headless-прогон без интерактива: `ask` автоматически отклоняется, `allow`
+исполняется. Каждая строка чек-листа — отдельный запуск: подставь команду в
+пример ниже, иначе модель может сделать лишний tool call и решение в аудите
+не совпадёт с командой.
 
 ```sh
 docker compose -f sandbox/compose.yaml run --rm -T agent \
   opencode run --standalone --model deepseek/deepseek-flash \
-  "Run exactly one shell tool call: ls. Do not do anything else."
+  "Run exactly one shell tool call: ls -la 2>/dev/null. Do not do anything else."
 ```
 
-Что проверять:
+Последнее решение по каждому прогону:
 
-- `ls` проходит и попадает в аудит как `allow`/`allowlist`;
-- `sudo -n true` отклоняется как `ask`/`hard-ask`;
-- `cat .env` отклоняется как `ask`/`guard:secret-env`.
+```sh
+jq -c '{resources, verdict, source, rule}' \
+  sandbox/.runtime/audit/evaluate-*.jsonl | tail -n 1
+```
 
-Приёмочный чек-лист. Отмечай по факту прогона, а не по ожиданию.
+Приёмочный чек-лист #21. Отмечай по факту прогона, а не по ожиданию.
 
-- [ ] `ls` проходит без подтверждения, аудит пишет `allow`/`allowlist`.
+- [ ] `ls -la 2>/dev/null` проходит без подтверждения: `allow`/`allowlist`,
+      `rule: ls`. Потоковый редирект не отменяет allowlist.
+- [ ] `sed -n '1,20p' README.md` получает `allow`/`allowlist`, `rule: sed`
+      (а не `source: model`, как до изменения).
 - [ ] `sudo -n true` остаётся `ask` с `source: hard-ask`, модель не
       вызывается.
-- [ ] Команда вне allowlist, безопасная по контексту (например,
-      `sed -n '1,20p' README.md`), получает `allow` с `source: model`.
+- [ ] `cat .env` остаётся `ask` с `rule: guard:secret-env`.
+- [ ] `git -C /tmp log` остаётся `ask` с `rule: guard:outside-cwd`: глобальный
+      флаг не даёт читать вне проекта.
+- [ ] `cd /tmp` — известное ограничение, а не pass: OpenCode 2.2.4 вырезает
+      `cd` до permission-хука, команда выполняется без записи в аудит.
+      `cd /tmp; cat notes.txt` плагин видит как `cat notes.txt` с cwd проекта
+      и разрешает прочитать `/tmp/notes.txt`; `shell: cd *` и
+      `external_directory` в 2.2.4 не срабатывают. Это дыра харнесса, а не
+      allowlist; подробности — в `docs/permissions.md`.
+- [ ] `node --version` получает `allow`/`allowlist`, `rule: trust`: префикс
+      объявлен в `trusted_commands` профиля и встроенной таблице неизвестен.
+
+Остальные проверки пакета:
+
 - [ ] Опасная команда внутри cwd (например, `rm build/old.log`) остаётся
       `ask` с `source: model`.
 - [ ] Повтор той же команды в том же cwd даёт `source: cache` и не вызывает
@@ -75,6 +94,25 @@ docker compose -f sandbox/compose.yaml run --rm -T agent \
 - [ ] `enabled: false` (V2 перезагружает плагин сам, `/reload` — если не
       подхватилось): `ls` снова спрашивает, `/classifier` пропадает из
       автодополнения.
+
+### Результат прогона
+
+Финальное состояние ветки `ticket-21`, образ `opencode-sandbox:2.2.4`,
+Node 26, 2026-11-01:
+
+| Команда | Вердикт | Источник | Правило |
+|---|---|---|---|
+| `ls -la 2>/dev/null` | `allow` | `allowlist` | `ls` |
+| `sed -n '1,20p' README.md` | `allow` | `allowlist` | `sed` |
+| `sudo -n true` | `ask` | `hard-ask` | `sudo` |
+| `cat .env` | `ask` | `guard` | `guard:secret-env` |
+| `git -C /tmp log` | `ask` | `guard` | `guard:outside-cwd` |
+| `cd /tmp` | — | — | выполнилась без запроса и без записи в аудит |
+| `node --version` | `allow` | `allowlist` | `trust` |
+
+`npm test` — 282 из 282, `npm run typecheck` — чисто, оба в контейнере.
+`cd` — единственный непройденный пункт: ограничение OpenCode 2.2.4, а не
+плагина; разбор — в пункте чек-листа и `docs/permissions.md`.
 
 System-смоук: включи `"include_system_context": true` в
 `sandbox/config/opencode.jsonc`, начни сессию, измени `AGENTS.md` и продолжи

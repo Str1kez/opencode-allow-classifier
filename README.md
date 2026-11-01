@@ -82,6 +82,16 @@
 до серверной части. Полный разбор конфига и политики — в
 [docs/permissions.md](docs/permissions.md).
 
+`trusted_commands` — единственное место, где проект сам расширяет allowlist:
+`npm test`, `npm run typecheck`, `node --test`. Запись сравнивается по точным
+токенам, минимум два токена, без глобов и shell-синтаксиса. Hard-ask и гарды
+проверяются раньше, поэтому `["sudo ls"]` не разрешает `sudo`,
+`["git push origin"]` не разрешает `git push`, а `["cat .env"]` остаётся
+`ask`. Хвост после префикса не анализируется: `["node --test"]` доверяет и
+`--test-reporter=./x.js`, который исполняет код. Опция живёт в конфиге
+проекта, риск берёт оператор; границы и примеры — в
+[docs/permissions.md#trusted_commands](docs/permissions.md#trusted_commands).
+
 ## Скиллы
 
 Установка, `inspect`, `verify`, `rollback` и разбор аудита живут в скиллах
@@ -128,6 +138,12 @@
 Компаунд оценивается целиком: одна небезопасная часть оставляет `ask` всему
 вызову. Полные списки правил, гардов и остаточные риски — в
 [docs/permissions.md](docs/permissions.md).
+
+Смену каталога (`cd`) плагин не проверяет: OpenCode разбирает её до
+permission-хука и передаёт дальше только остаток команды, поэтому
+`cd /tmp; cat notes.txt` выглядит как `cat notes.txt` в проекте. Остаточный
+риск — в
+[docs/permissions.md](docs/permissions.md#границы-allowlist-и-остаточный-риск).
 
 ## `/classifier`
 
