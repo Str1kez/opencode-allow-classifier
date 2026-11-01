@@ -201,6 +201,24 @@ test("maps guard-source clusters to the allowlist lever and still reads old guar
   assert.match(observation?.note ?? "", /оставить/);
 });
 
+test("keeps a guard-only metacharacter cluster as an unconfirmed observation", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    // The guard fired before the allowlist, so the record proves neither a read-only shape nor an
+    // allowlist match. The noisy guard alone is not evidence for widening it.
+    ...ask(['rg "a|b"'], 3, { source: "guard", rule: "guard:shell-metacharacter", probability: null }),
+  ]);
+
+  const report = analyze(directory, audit);
+
+  assert.deepEqual(report.classifierErrors, []);
+  assert.deepEqual(report.recommendations, []);
+  const observation = report.observations.find((item) => item.signature === "rg <text>");
+  assert.equal(observation?.lever, "allowlist-and-guards");
+  assert.match(observation?.note ?? "", /оставить — read-only форма не подтверждена/);
+});
+
 test("keeps clusters below three occurrences as observations without a recommendation", (t) => {
   const directory = scratch(t);
   const audit = join(directory, "audit");
