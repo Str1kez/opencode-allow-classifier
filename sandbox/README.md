@@ -56,6 +56,10 @@ docker compose -f sandbox/compose.yaml run --rm -T agent \
   "Run exactly one shell tool call: ls -la 2>/dev/null. Do not do anything else."
 ```
 
+Модель в примере — `deepseek/deepseek-flash`; финальный прогон в таблице ниже
+шёл на `opencode/gpt-5.4-mini`, потому что DeepSeek отвечал
+`Insufficient Balance`.
+
 Последнее решение по каждому прогону:
 
 ```sh
