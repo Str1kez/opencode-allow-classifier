@@ -567,6 +567,9 @@ test("printf cannot smuggle terminal control escapes past the allowlist", async 
     ["printf '%b' '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
     // `-v` may carry the variable name in the same token; the format is still the next argument.
     ["printf -vx '%b' '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    // Every argument is scanned: a format that starts with `-v` is still a format.
+    ["printf -- '-v\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    ["printf '-v\\033]52;c;SGVsbG8='", "guard:printf-escape"],
   ];
 
   try {
@@ -580,6 +583,7 @@ test("printf cannot smuggle terminal control escapes past the allowlist", async 
     // Plain formatting stays read-only: `\n` is a line break, not a control escape.
     assert.equal(await verdict(harness, ["printf '%s\\n' x"]), "allow");
     assert.equal(await verdict(harness, ["printf '%s %s\\n' a b"]), "allow");
+    assert.equal(await verdict(harness, ["printf -v out '%s\\n' x"]), "allow");
   } finally {
     harness.dispose();
   }

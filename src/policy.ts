@@ -589,19 +589,13 @@ function matchesGuard(rule: GuardRule, segment: Segment, cwd: string, realpath: 
       return segment.tokens.some((token) => matchesLongFlagPrefix(token, [rule.value]));
     case "program-path":
       return !isTrustedProgramPath(segment.tokens[0] ?? "", TRUSTED_PROGRAM_DIRECTORIES);
-    case "printf-escape": {
-      // The format is the one argument printf always interprets. Options are `--` and bash's `-v`,
-      // which takes the variable name either as the next argument (`-v x`) or inside the token (`-vx`).
-      let index = 1;
-      if (segment.tokens[index] === "--") index += 1;
-      while (segment.tokens[index]?.startsWith("-v") && segment.tokens[index] !== "--") {
-        index += segment.tokens[index] === "-v" ? 2 : 1;
-      }
-
-      const format = segment.tokens[index];
-      if (format === undefined) return false;
-      return format.includes("%b") || PRINTF_CONTROL_ESCAPE.test(format);
-    }
+    case "printf-escape":
+      // Scan every argument, not just the format. `printf` accepts `-v` options, and a format that
+      // starts with `-v` is still interpreted; a `-v` variable name cannot contain an escape, so a
+      // match on an option value only over-asks.
+      return segment.tokens
+        .slice(1)
+        .some((token) => token.includes("%b") || PRINTF_CONTROL_ESCAPE.test(token));
     case "outside-cwd":
       return readsOutsideCwd(segment.tokens, cwd, realpath);
     case "unrestricted-search":
