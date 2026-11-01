@@ -79,11 +79,11 @@ function elapsed(started: number): number {
 }
 
 /**
- * Auto-mode pipeline: hard-ask → allowlist with guard → cache → model → default `ask`.
+ * Auto-mode pipeline: hard-ask → guard → allowlist → cache → model → default `ask`.
  *
  * `decide` owns the static stages and never sees an Effect. Only a call that falls through the
  * allowlist reaches the cache and the model. Hard-ask and a fired guard stay `ask` with their own
- * source, exactly as before. The classifier can only lower `ask` to `allow`; nothing here can deny.
+ * source. The classifier can only lower `ask` to `allow`; nothing here can deny.
  */
 export async function evaluate(input: EvaluationInput, options: PipelineOptions): Promise<Decision> {
   const started = performance.now();

@@ -93,6 +93,15 @@
 
 ### Изменено
 
+- Порядок решения — hard-ask → гард → allowlist → `ask` по умолчанию, каждый
+  шаг проходит по всем сегментам. Гард больше не зависит от того, знакома ли
+  allowlist программа: `python3 -c 'print(1)' ; cat ~/.ssh/id_rsa` и обратный
+  порядок дают одинаковый `ask` с `rule: guard:secret-ssh`, а `cmd 2> err.log`
+  спрашивает с `guard:redirect`. Сработавший гард модель не вызывает. В
+  аудите такие решения получают `source: guard`; старые записи с
+  `source: allowlist` и `rule: guard:*` читаются по-прежнему, а отчёт относит
+  `guard` к рычагу `allowlist-and-guards`. Решение — в
+  [ADR-0004](docs/adr/0004-decision-order.md).
 - Редиректы в поток (`2>&1`, `>&2`, `2>/dev/null`, `1>/dev/null`,
   `>/dev/null`) больше не отменяют allowlist: read-only команда с таким
   хвостом получает `allow`. Запись в файл (`> out.txt`, `2> err.log`, `>>`)

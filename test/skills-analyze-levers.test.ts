@@ -176,6 +176,31 @@ test("assigns every cluster to exactly one lever, including mixed sources", (t) 
   assert.equal(assigned.get("terraform plan"), "classifier-errors");
 });
 
+test("maps guard-source clusters to the allowlist lever and still reads old guard records", (t) => {
+  const directory = scratch(t);
+  const audit = join(directory, "audit");
+  writeLines(audit, "evaluate-2026-10.jsonl", [
+    // New records name the guard as the decision source.
+    ...ask(["cat .env"], 3, { source: "guard", rule: "guard:secret-env", probability: null }),
+    // Historical records carry the old source and must keep their meaning.
+    ...ask(["cat secrets.txt"], 3, { source: "allowlist", rule: "guard:secret-generic", probability: null }),
+  ]);
+
+  const report = analyze(directory, audit);
+
+  assert.deepEqual(report.classifierErrors, []);
+  assert.deepEqual(
+    report.levers.map((section) => section.lever),
+    ["allowlist-and-guards", "model-and-threshold", "hard-ask", "classifier-errors"],
+  );
+  assert.equal(report.levers[0]?.clusters.some((cluster) => cluster.signature === "cat <path>"), true);
+  assert.equal(report.levers[3]?.clusters.length, 0);
+
+  const observation = report.observations.find((item) => item.signature === "cat <path>");
+  assert.equal(observation?.lever, "allowlist-and-guards");
+  assert.match(observation?.note ?? "", /оставить/);
+});
+
 test("keeps clusters below three occurrences as observations without a recommendation", (t) => {
   const directory = scratch(t);
   const audit = join(directory, "audit");
