@@ -824,6 +824,152 @@ test("a write redirect asks even when its program is unknown", async () => {
   }
 });
 
+test("trusted commands allow a declared prefix with rule trust", async () => {
+  const harness = await start({ trusted_commands: ["npm test"] });
+  const allowed = ["npm test", "npm test 2>&1", "npm test -- --watch=false"];
+
+  try {
+    for (const command of allowed) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "allow", `${command} must be allowed`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "allowlist", rule: "trust" },
+        command,
+      );
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "a trusted command must not reach the model");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("an undeclared command stays with the classifier and a prefix matches whole tokens only", async () => {
+  const harness = await start({ trusted_commands: ["npm test"] });
+  const asked = [
+    // Not declared: the stock conservative behaviour must hold.
+    "npm run typecheck",
+    // Same prefix, longer token.
+    "npm testing",
+    // The prefix is compared as typed, global flags are not skipped.
+    "npm --prefix . test",
+  ];
+
+  try {
+    for (const command of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "model", rule: "classifier" },
+        command,
+      );
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("trust cannot override hard-ask or a guard", async () => {
+  const harness = await start({
+    trusted_commands: ["sudo ls", "git push origin", "cat .env", "npm test"],
+  });
+  const cases: ReadonlyArray<readonly [string, string, string]> = [
+    ["sudo ls", "hard-ask", "sudo"],
+    ["git push origin main", "hard-ask", "git-push"],
+    ["cat .env", "guard", "guard:secret-env"],
+    ["npm test > out.log", "guard", "guard:redirect"],
+  ];
+
+  try {
+    for (const [command, source, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual({ source: entry?.["source"], rule: entry?.["rule"] }, { source, rule }, command);
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "hard-ask and guards must not pay for a model call");
+
+    // A trusted segment does not disarm a hard-ask on its neighbour.
+    const compound = evaluation({ resources: ["npm test", "sudo ls"] });
+    await harness.evaluate(compound);
+    assert.equal(compound.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["source"], "hard-ask");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("invalid trusted entries are ignored and do not crash the plugin", async () => {
+  const invalid: ReadonlyArray<unknown> = [
+    "npm test", // not an array
+    { 0: "npm test" },
+    42,
+    ["npm"], // one token
+    [""],
+    ["   "],
+    ["npm\ntest"], // a newline is shell syntax even though it tokenizes into the same prefix
+    ["npm; rm -rf /"],
+    [null, 42],
+  ];
+
+  for (const trusted_commands of invalid) {
+    const harness = await start({ trusted_commands });
+    try {
+      assert.equal(await verdict(harness, ["ls"]), "allow", `${JSON.stringify(trusted_commands)}: plugin must keep working`);
+      assert.equal(await verdict(harness, ["npm test"]), "ask", `${JSON.stringify(trusted_commands)}: entry must be ignored`);
+    } finally {
+      harness.dispose();
+    }
+  }
+
+  // A broken neighbour does not discard the valid entry.
+  const mixed = await start({ trusted_commands: ["npm test", null, 42] });
+  try {
+    assert.equal(await verdict(mixed, ["npm test"]), "allow");
+  } finally {
+    mixed.dispose();
+  }
+
+  // A backslash is not unescaped by the tokenizer, so the declared token would not be the command the
+  // shell runs: the entry is dropped instead of matching the escaped spelling.
+  const escaped = await start({ trusted_commands: ["npm\\ test"] });
+  try {
+    assert.equal(await verdict(escaped, ["npm\\ test"]), "ask");
+  } finally {
+    escaped.dispose();
+  }
+});
+
+test("trusted commands are capped at fifty entries", async () => {
+  const declared = Array.from({ length: 50 }, (_, index) => `npm t${index}`);
+  const harness = await start({ trusted_commands: [...declared, "npm overflow"] });
+
+  try {
+    assert.equal(await verdict(harness, ["npm t0"]), "allow");
+    assert.equal(await verdict(harness, ["npm t49"]), "allow");
+    assert.equal(await verdict(harness, ["npm overflow"]), "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["source"], "model");
+  } finally {
+    harness.dispose();
+  }
+
+  // The cap is positional: a valid entry after the fiftieth slot is still ignored.
+  const late = await start({ trusted_commands: [...Array.from({ length: 50 }, () => "npm"), "npm test"] });
+  try {
+    assert.equal(await verdict(late, ["npm test"]), "ask");
+  } finally {
+    late.dispose();
+  }
+});
+
 test("the spec verdict table holds", async () => {
   const harness = await start();
   const table: ReadonlyArray<readonly [string, "allow" | "ask"]> = [

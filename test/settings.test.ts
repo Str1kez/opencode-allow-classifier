@@ -164,6 +164,7 @@ test("readOptions parses the config, ignoring invalid model and threshold values
     threshold: undefined,
     timeoutMs: undefined,
     includeSystemContext: false,
+    trustedCommands: [],
   });
 
   assert.deepEqual(
@@ -174,6 +175,7 @@ test("readOptions parses the config, ignoring invalid model and threshold values
       threshold: 0.75,
       timeout_ms: 1500,
       include_system_context: true,
+      trusted_commands: ["npm test"],
     }),
     {
       enabled: false,
@@ -182,6 +184,7 @@ test("readOptions parses the config, ignoring invalid model and threshold values
       threshold: 0.75,
       timeoutMs: 1500,
       includeSystemContext: true,
+      trustedCommands: [["npm", "test"]],
     },
   );
 

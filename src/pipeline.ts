@@ -11,6 +11,7 @@ import {
 } from "./classifier.ts";
 import { verdictCacheKey, type VerdictCache } from "./cache.ts";
 import { decide, type Decision, type DecisionSource, type Verdict } from "./policy.ts";
+import type { TrustedCommand } from "./settings.ts";
 import type { RealPathResolver } from "./shell.ts";
 
 /** What the cache stores: a successful model verdict only. Failures are never cached. */
@@ -29,6 +30,8 @@ export interface PipelineOptions {
   /** Total classifier budget; the stock 3 s applies when absent. */
   readonly timeoutMs?: number;
   readonly realpath?: RealPathResolver;
+  /** Per-project prefixes from `trusted_commands`; matched inside the allowlist stage. */
+  readonly trustedCommands?: ReadonlyArray<TrustedCommand>;
   /**
    * Send the last system message to the classifier. Off by default: system text may contain internal
    * data and leaves the machine when the classifier runs on a remote provider.
@@ -87,7 +90,10 @@ function elapsed(started: number): number {
  */
 export async function evaluate(input: EvaluationInput, options: PipelineOptions): Promise<Decision> {
   const started = performance.now();
-  const staticDecision = decide(input.resources, input.cwd, options.realpath);
+  const staticDecision = decide(input.resources, input.cwd, {
+    realpath: options.realpath,
+    trustedCommands: options.trustedCommands,
+  });
 
   if (staticDecision.source !== "default" || staticDecision.rule === "empty-resources") {
     return staticDecision;

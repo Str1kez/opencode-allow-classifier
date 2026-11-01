@@ -6,6 +6,7 @@
  */
 
 import { DEFAULT_MODEL, SAFETY_THRESHOLD } from "./classifier.ts";
+import { hasActiveShellSyntax, tokenize } from "./shell.ts";
 
 /** `ctx.storage` key holding the TUI-selected model. Namespaced by the host, so the bare name is enough. */
 export const MODEL_OVERRIDE_KEY = "model_override";
@@ -70,6 +71,40 @@ export function isThreshold(value: unknown): value is number {
  */
 export function isTimeoutMs(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_TIMEOUT_MS;
+}
+
+/** Upper bound on user-declared prefixes; every entry past it is ignored, not an error. */
+export const MAX_TRUSTED_COMMANDS = 50;
+
+/** One user-declared prefix, already tokenized: exact tokens, no globs, at least two of them. */
+export type TrustedCommand = ReadonlyArray<string>;
+
+/**
+ * Turns the `trusted_commands` option into prefixes the policy can match. A broken entry is dropped
+ * silently, mirroring a broken `threshold`: the operator gets the stock conservative behaviour, never
+ * a crash and never a wider allow than the one written in the config.
+ *
+ * The entry must not contain active shell syntax (`;`, `&&`, `|`, `$()`, globs, a newline). Quoted
+ * characters are literal to the shell, so `npm "test"` is just the prefix `npm test` and is accepted.
+ * A backslash is rejected even though the shell treats it as an escape: the tokenizer does not
+ * unescape, so the declared token would not be the word the shell actually runs. A single token is
+ * rejected on purpose — trusting a bare `npm` or `sh` would mean trusting anything the program can be
+ * told to run. Only the first `MAX_TRUSTED_COMMANDS` entries are read: the rest is ignored whether it
+ * is valid or not, and a broken entry inside the window just drops out.
+ */
+export function parseTrustedCommands(value: unknown): ReadonlyArray<TrustedCommand> {
+  if (!Array.isArray(value)) return [];
+
+  const commands: TrustedCommand[] = [];
+  for (const entry of value.slice(0, MAX_TRUSTED_COMMANDS)) {
+    if (typeof entry !== "string" || entry.includes("\\") || hasActiveShellSyntax(entry)) continue;
+
+    const tokens = tokenize(entry);
+    if (tokens.length < 2) continue;
+    commands.push(tokens);
+  }
+
+  return commands;
 }
 
 /**

@@ -90,6 +90,14 @@
   (`git-command-override`) и `git --paginate` (`git-pager-override`).
   `cd` в allowlist не входит; неизвестные формы `sed` уходят
   к классификатору, а не запрещаются.
+- Опция `trusted_commands`: массив префиксов, которые в проекте не спрашивают
+  (`npm test`, `npm run typecheck`, `node --test`). Сравнение по точным
+  токенам, минимум два токена, без shell-синтаксиса; невалидная запись
+  отбрасывается молча, принимается не больше 50. Совпадение даёт `allow` с
+  `source: allowlist` и `rule: trust`. Hard-ask и гарды выигрывают: запись
+  `["sudo ls"]` не разрешает `sudo`, а `["cat .env"]` остаётся `ask` с
+  `guard:secret-env`. Решение — в
+  [ADR-0005](docs/adr/0005-trusted-commands.md).
 
 ### Изменено
 

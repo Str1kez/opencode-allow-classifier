@@ -243,6 +243,7 @@ export const ServerPlugin = Plugin.define({
             timeoutMs: options.timeoutMs,
             realpath: realPath,
             includeSystemContext: options.includeSystemContext,
+            trustedCommands: options.trustedCommands,
           });
 
           if (decision.verdict === "allow") evaluation.effect = "allow";
