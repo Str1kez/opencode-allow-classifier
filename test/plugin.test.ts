@@ -502,14 +502,26 @@ test("pipeline helpers are allowed and sort cannot write a file", async () => {
   const harness = await start();
   const allowed: ReadonlyArray<readonly [string, string]> = [
     ["cut -d, -f2 file", "cut"],
+    // The separator is a value, not a path: `/` here must not read as the filesystem root.
+    ["cut -d/ -f2 file", "cut"],
+    ["cut -d / -f2 file", "cut"],
+    // getopt keeps a value flag anywhere in the cluster: `-s` is a flag, `d/` is the delimiter value.
+    ["cut -sd/ -f2 file", "cut"],
     ["tr a-z A-Z", "tr"],
+    ["tr -d /", "tr"],
     ["nl README.md", "nl"],
+    ["nl -s/ file", "nl"],
+    ["nl -s / file", "nl"],
     ["strings ./bin", "strings"],
     ["printf '%s\\n' x", "printf"],
     ["true", "true"],
     ["sleep 1", "sleep"],
     ["sort file", "sort"],
     ["sort -n file", "sort"],
+    ["sort -t/ -k1 file", "sort"],
+    ["sort -t / -k1 file", "sort"],
+    // `-T` names a real directory, but `.` is inside cwd, so the value is not an escape.
+    ["sort -T . file", "sort"],
   ];
   const asked: ReadonlyArray<readonly [string, string]> = [
     ["sort -o out.txt file", "guard:sort-output"],
@@ -531,6 +543,37 @@ test("pipeline helpers are allowed and sort cannot write a file", async () => {
       assert.equal(input.effect, "ask", `${command} must ask`);
       assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
     }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("printf cannot smuggle terminal control escapes past the allowlist", async () => {
+  const harness = await start();
+  const asked: ReadonlyArray<readonly [string, string]> = [
+    // OSC 52 writes the clipboard; the format carries an octal escape, not a literal ESC byte, so the
+    // metacharacter guard (which keys on the raw byte) never sees it.
+    ["printf '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    ["printf '\\x1b[2J'", "guard:printf-escape"],
+    ["printf '\\u001b[31m'", "guard:printf-escape"],
+    ["printf '\\e[2J'", "guard:printf-escape"],
+    ["printf '\\a'", "guard:printf-escape"],
+    ["printf '\\0'", "guard:printf-escape"],
+    // `%b` makes printf interpret escapes in the argument, so the format is not the only way in.
+    ["printf '%b' '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+  ];
+
+  try {
+    for (const [command, rule] of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    // Plain formatting stays read-only: `\n` is a line break, not a control escape.
+    assert.equal(await verdict(harness, ["printf '%s\\n' x"]), "allow");
+    assert.equal(await verdict(harness, ["printf '%s %s\\n' a b"]), "allow");
   } finally {
     harness.dispose();
   }
@@ -1513,6 +1556,15 @@ test("reads are allowed only inside the working directory", async () => {
     ["cat ../x", "guard:outside-cwd"],
     ["cat ~/notes.txt", "guard:outside-cwd"],
     ["cat /Users/other/file", "guard:outside-cwd"],
+    ["cat /tmp/x", "guard:outside-cwd"],
+    ["git -C /tmp log", "guard:outside-cwd"],
+    // `-T` and `--temporary-directory` are real paths even though other sort values are not.
+    ["sort -T /tmp file", "guard:outside-cwd"],
+    ["sort -T/tmp file", "guard:outside-cwd"],
+    ["sort --temporary-directory=/tmp file", "guard:outside-cwd"],
+    ["sort --temporary-directory /tmp file", "guard:outside-cwd"],
+    // A no-value flag before `-T` in the same cluster must not hide the path value.
+    ["sort -sT/tmp file", "guard:outside-cwd"],
     ["ls ../../..", "guard:outside-cwd"],
     ["du -a /", "guard:outside-cwd"],
     ["rg TODO ~", "guard:outside-cwd"],

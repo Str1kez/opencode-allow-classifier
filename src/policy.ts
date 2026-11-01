@@ -283,6 +283,12 @@ function guardTexts(segment: Segment): ReadonlyArray<string> {
   );
 }
 
+/**
+ * Escapes printf turns into bytes: `\0` covers the octal form (`\033`), `\x` and `\u` the hex forms,
+ * `\e` is ESC and `\a` is BEL. `%b` applies the same interpretation to an argument.
+ */
+const PRINTF_CONTROL_ESCAPE = /\\(?:0|x|u|e|a)/;
+
 /** `grep -r`, `-R`, `-rn`, `-d` and their long forms. */
 const GREP_RECURSIVE_SHORT = /^-[^-]*[rRd]/;
 const GREP_RECURSIVE_LONG: readonly string[] = ["--recursive", "--dereference-recursive", "--directories"];
@@ -407,14 +413,141 @@ function pathCandidates(token: string): string[] {
   return candidates;
 }
 
+/**
+ * Value flags grouped by program. `true` marks flags whose argument is a real filesystem path
+ * (`sort -T`), `false` a value that is not (`cut -d/` splits on a slash, `sort -t/` sets the field
+ * separator). Without the table the path guard reads `/` as the filesystem root and asks.
+ *
+ * Every value-taking flag of the listed programs must be here: a missing entry would make the parser
+ * read the value as an option word, and `sort -sT/tmp` would lose `/tmp`.
+ */
+const VALUE_FLAGS: Readonly<Record<string, readonly (readonly [string, boolean])[]>> = {
+  cut: [
+    ["-b", false],
+    ["-c", false],
+    ["-d", false],
+    ["-f", false],
+    ["--bytes", false],
+    ["--characters", false],
+    ["--delimiter", false],
+    ["--fields", false],
+    ["--output-delimiter", false],
+  ],
+  nl: [
+    ["-b", false],
+    ["-d", false],
+    ["-f", false],
+    ["-h", false],
+    ["-i", false],
+    ["-l", false],
+    ["-n", false],
+    ["-s", false],
+    ["-v", false],
+    ["-w", false],
+    ["--body-numbering", false],
+    ["--footer-numbering", false],
+    ["--header-numbering", false],
+    ["--join-blank-lines", false],
+    ["--line-increment", false],
+    ["--number-format", false],
+    ["--number-separator", false],
+    ["--number-width", false],
+    ["--section-delimiter", false],
+    ["--starting-line-number", false],
+  ],
+  sort: [
+    ["-k", false],
+    ["-S", false],
+    ["-t", false],
+    ["-T", true],
+    ["--batch-size", false],
+    ["--buffer-size", false],
+    ["--field-separator", false],
+    ["--key", false],
+    ["--parallel", false],
+    ["--temporary-directory", true],
+  ],
+};
+
+/** Programs that never open a file named in argv: `tr` reads stdin and writes stdout only. */
+const ARGV_ONLY_PROGRAMS: ReadonlySet<string> = new Set(["tr"]);
+
+interface ValueFlagMatch {
+  readonly path: boolean;
+  /** The value is inside the token (`-d/`, `--delimiter=/`), not the next argument. */
+  readonly attached: boolean;
+  readonly value: string;
+}
+
+function matchLongValueFlag(
+  flags: readonly (readonly [string, boolean])[],
+  token: string,
+): ValueFlagMatch | undefined {
+  const equals = token.indexOf("=");
+  const name = equals === -1 ? token : token.slice(0, equals);
+  // getopt_long accepts any unambiguous prefix, the same way the long-flag guards do.
+  const match = flags.find(([flag]) => flag.startsWith("--") && flag.startsWith(name));
+  if (match === undefined) return undefined;
+  return { path: match[1], attached: equals !== -1, value: equals === -1 ? "" : token.slice(equals + 1) };
+}
+
+/**
+ * getopt processes a short cluster left to right: the first value flag takes the rest of the token
+ * (`-d/`, `-T/tmp`) or the next argument (`-d /`, `-T /tmp`). Letters before it are plain flags.
+ */
+function matchShortValueFlag(
+  flags: readonly (readonly [string, boolean])[],
+  token: string,
+): ValueFlagMatch | undefined {
+  const letters = token.slice(1);
+  for (let index = 0; index < letters.length; index += 1) {
+    const match = flags.find(([flag]) => flag === `-${letters[index]}`);
+    if (match === undefined) continue;
+    const value = letters.slice(index + 1);
+    return { path: match[1], attached: value.length > 0, value };
+  }
+  return undefined;
+}
+
+function valueFlagMatch(program: string, token: string): ValueFlagMatch | undefined {
+  const flags = VALUE_FLAGS[program];
+  if (flags === undefined || token === "-" || !token.startsWith("-")) return undefined;
+  return token.startsWith("--") ? matchLongValueFlag(flags, token) : matchShortValueFlag(flags, token);
+}
+
 function readsOutsideCwd(tokens: ReadonlyArray<string>, cwd: string, realpath: RealPathResolver | undefined): boolean {
-  return tokens.slice(1).some((token) =>
-    pathCandidates(token).some(
-      (candidate) =>
-        (isPathLike(candidate) && resolvesOutsideCwd(candidate, cwd, realpath)) ||
-        // A bare name cannot escape lexically, but it can be a symlink to a file outside the project.
-        (realpath !== undefined && escapesCwd(candidate, cwd, realpath)),
-    ),
+  const program = programOf(tokens[0]);
+  if (ARGV_ONLY_PROGRAMS.has(program)) return false;
+
+  const candidates: string[] = [];
+  const args = tokens.slice(1);
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]!;
+    const match = valueFlagMatch(program, token);
+    if (match === undefined) {
+      candidates.push(...pathCandidates(token));
+      continue;
+    }
+    if (match.path) {
+      if (match.attached) {
+        if (match.value !== "") candidates.push(match.value);
+      } else {
+        const value = args[index + 1];
+        if (value !== undefined) {
+          candidates.push(...pathCandidates(value));
+          index += 1;
+        }
+      }
+    } else if (!match.attached) {
+      index += 1;
+    }
+  }
+
+  return candidates.some(
+    (candidate) =>
+      (isPathLike(candidate) && resolvesOutsideCwd(candidate, cwd, realpath)) ||
+      // A bare name cannot escape lexically, but it can be a symlink to a file outside the project.
+      (realpath !== undefined && escapesCwd(candidate, cwd, realpath)),
   );
 }
 
@@ -455,6 +588,16 @@ function matchesGuard(rule: GuardRule, segment: Segment, cwd: string, realpath: 
       return segment.tokens.some((token) => matchesLongFlagPrefix(token, [rule.value]));
     case "program-path":
       return !isTrustedProgramPath(segment.tokens[0] ?? "", TRUSTED_PROGRAM_DIRECTORIES);
+    case "printf-escape": {
+      // The format is the one argument printf always interprets; options are `--` and bash's `-v name`.
+      let index = 1;
+      if (segment.tokens[index] === "--") index += 1;
+      if (segment.tokens[index] === "-v") index += 2;
+
+      const format = segment.tokens[index];
+      if (format === undefined) return false;
+      return format.includes("%b") || PRINTF_CONTROL_ESCAPE.test(format);
+    }
     case "outside-cwd":
       return readsOutsideCwd(segment.tokens, cwd, realpath);
     case "unrestricted-search":
