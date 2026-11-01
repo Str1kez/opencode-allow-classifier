@@ -271,6 +271,8 @@ export const GUARD_RULES: readonly GuardRule[] = [
   { name: "git-external-command", kind: "long-flag", value: "--show-signature" },
   // `-c` itself is skipped with the other global flags; the config it carries is what gets checked.
   { name: "git-command-override", kind: "git-command-override", program: "git" },
+  // `--paginate` forces a pager even without a tty, and `core.pager`/`pager.*` name a program.
+  { name: "git-pager-override", kind: "long-flag", value: "--paginate", program: "git" },
 
   // Flags that read a file the positional guard never sees.
   // `-f` is absent for `grep`/`rg`: it only loads patterns. `jq -f` runs a jq program that can print

@@ -222,7 +222,9 @@
   `sort -o`/`sort --output` (`guard:sort-output`);
 - подмена того, что запускает git: `git -c key=value`, `git --config-env=VAR key`
   и `git --exec-path=DIR` (`guard:git-command-override`) — конфиг может
-  называть программу, а `--exec-path` меняет каталог подкоманд;
+  называть программу, а `--exec-path` меняет каталог подкоманд; отдельно
+  `git --paginate` (`guard:git-pager-override`) принудительно запускает pager
+  из конфига;
 - исполнение чужих программ: `rg --pre`, `git --ext-diff`/`--textconv`,
   `sort --compress-program` (включая сокращённое `--compress-p`) — sort
   запускает указанную программу на временных файлах;
@@ -310,9 +312,11 @@ System-контекст — отдельный остаточный риск. Е
   `guard:sort-compress-program`; `git -c core.pager=cat log` — с
   `guard:git-command-override`.
 - `git --exec-path=. log` спрашивает с `guard:git-command-override`, а
-  `git --exec-path evil log` и `git --paginate log` уходят к классификатору:
-  пробельная форма `--exec-path` не задаёт путь, а принудительный pager
-  берёт программу из конфига.
+  `git --exec-path evil log` уходит к классификатору: пробельная форма
+  `--exec-path` не задаёт путь.
+- `git --paginate log` спрашивает с `guard:git-pager-override`:
+  принудительный pager берёт программу из конфига. `git --paginate push`
+  остаётся hard-ask: глобальные флаги пропускаются до проверки `git push`.
 - `cd /tmp` по-прежнему спрашивает: `cd` в allowlist не входит.
 
 ## Аудит

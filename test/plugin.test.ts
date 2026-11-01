@@ -472,14 +472,27 @@ test("git global flags do not block the allowlist and -C stays inside cwd", asyn
       assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
     }
 
-    // A spaced `--exec-path` is not a value for git, and `--paginate` can force a configured pager:
-    // neither is a global flag the allowlist may skip.
-    for (const command of ["git --exec-path evil log", "git --paginate log"]) {
-      const input = evaluation({ resources: [command] });
-      await harness.evaluate(input);
-      assert.equal(input.effect, "ask", `${command} must ask`);
-      assert.equal(harness.auditEntries().at(-1)?.["rule"], "classifier", command);
-    }
+    // A spaced `--exec-path` is not a value for git, so the shape falls through to the classifier.
+    const spacedExecPath = evaluation({ resources: ["git --exec-path evil log"] });
+    await harness.evaluate(spacedExecPath);
+    assert.equal(spacedExecPath.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "classifier");
+
+    // `--paginate` is still skipped for hard-ask, which must keep seeing `push` behind it.
+    const paginatePush = evaluation({ resources: ["git --paginate push"] });
+    await harness.evaluate(paginatePush);
+    assert.equal(paginatePush.effect, "ask");
+    const pushEntry = harness.auditEntries().at(-1);
+    assert.deepEqual(
+      { source: pushEntry?.["source"], rule: pushEntry?.["rule"] },
+      { source: "hard-ask", rule: "git-push" },
+    );
+
+    // The same flag forces a pager named in config, so the allowlist must not skip it silently.
+    const paginateLog = evaluation({ resources: ["git --paginate log"] });
+    await harness.evaluate(paginateLog);
+    assert.equal(paginateLog.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "guard:git-pager-override");
   } finally {
     harness.dispose();
   }

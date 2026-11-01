@@ -86,9 +86,10 @@
   а также `cut`, `tr`, `nl`, `strings`, `printf`, `true`, `sleep` и `sort`.
   Глобальные флаги git (`-C`, `--no-pager`) больше не мешают allowlist,
   но путь из `-C` вне cwd спрашивает. Новые гарды: `sort -o`/`--output`,
-  `sort --compress-program` и `git -c`/`--config-env`/`--exec-path=`
-  (`git-command-override`). `cd` в allowlist не входит; неизвестные формы
-  `sed` уходят к классификатору, а не запрещаются.
+  `sort --compress-program`, `git -c`/`--config-env`/`--exec-path=`
+  (`git-command-override`) и `git --paginate` (`git-pager-override`).
+  `cd` в allowlist не входит; неизвестные формы `sed` уходят
+  к классификатору, а не запрещаются.
 
 ### Изменено
 

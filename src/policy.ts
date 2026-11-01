@@ -74,7 +74,9 @@ interface GlobalFlags {
 const PROGRAM_GLOBAL_FLAGS: Readonly<Record<string, GlobalFlags>> = {
   git: {
     withValue: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"],
-    boolean: ["--no-pager", "--bare", "--literal-pathspecs", "--no-replace-objects", "--no-optional-locks"],
+    // `--paginate` stays here so hard-ask still sees `git --paginate push`; the allowlist never
+    // benefits from it because the `git-pager-override` guard fires on the same flag.
+    boolean: ["--no-pager", "--paginate", "--bare", "--literal-pathspecs", "--no-replace-objects", "--no-optional-locks"],
     attachedValue: ["--exec-path"],
   },
   npm: {
