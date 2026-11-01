@@ -23,6 +23,8 @@ interface DryRunCase {
   readonly verdict: Decision["verdict"];
   readonly source: Decision["source"];
   readonly rule: string;
+  /** A feature probe, not a fixed table entry: a mismatch means the config cannot demonstrate it. */
+  readonly optional?: boolean;
 }
 
 /**
@@ -53,6 +55,7 @@ export interface DryRunResult {
   readonly expected: string;
   readonly actual: string;
   readonly matches: boolean;
+  readonly status: "pass" | "fail" | "skip";
 }
 
 export interface AuditLocation {
@@ -97,7 +100,7 @@ export function runVerify(path: string, options: VerifyOptions): VerifyReport {
     checkDependencies(options.depsRoot),
   ];
   const dryRun = runDryRun(config.report.plugin.trustedCommands);
-  const ok = checks.every((check) => check.status !== "fail") && dryRun.every((result) => result.matches);
+  const ok = checks.every((check) => check.status !== "fail") && dryRun.every((result) => result.status !== "fail");
 
   return {
     configPath: path,
@@ -118,11 +121,13 @@ export function formatVerifyText(report: VerifyReport): string {
   if (report.dryRun.length > 0) {
     lines.push("dry run (no command executed):");
     for (const result of report.dryRun) {
-      lines.push(
-        result.matches
-          ? `  PASS ${result.command} -> ${result.expected}`
-          : `  FAIL ${result.command} -> expected ${result.expected}, got ${result.actual}`,
-      );
+      if (result.status === "pass") {
+        lines.push(`  PASS ${result.command} -> ${result.expected}`);
+      } else if (result.status === "skip") {
+        lines.push(`  SKIP ${result.command} -> ${result.actual}; no declared prefix yields allow / allowlist / trust`);
+      } else {
+        lines.push(`  FAIL ${result.command} -> expected ${result.expected}, got ${result.actual}`);
+      }
     }
   }
 
@@ -277,11 +282,13 @@ function runDryRun(trustedCommands: readonly (readonly string[])[]): DryRunResul
   // A throwaway cwd makes the outside-cwd guard deterministic without touching the caller's tree.
   const cwd = mkdtempSync(join(tmpdir(), "ocac-verify-"));
   try {
-    return [...DRY_RUN_CASES, ...trustedDryRunCase(trustedCommands)].map((testCase) => {
+    return [...DRY_RUN_CASES, ...trustedDryRunCase(trustedCommands, cwd)].map((testCase) => {
       const decision = decide([testCase.command], cwd, { trustedCommands });
       const expected = `${testCase.verdict} / ${testCase.source} / ${testCase.rule}`;
       const actual = `${decision.verdict} / ${decision.source} / ${decision.rule}`;
-      return { command: testCase.command, expected, actual, matches: actual === expected };
+      const matches = actual === expected;
+      const status = matches ? "pass" : testCase.optional === true ? "skip" : "fail";
+      return { command: testCase.command, expected, actual, matches, status };
     });
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -289,18 +296,35 @@ function runDryRun(trustedCommands: readonly (readonly string[])[]): DryRunResul
 }
 
 /**
- * One declared prefix proves `trusted_commands` reaches `decide`. `inspect` reports the list already
- * tokenized, so the command is rebuilt only when joining the tokens reproduces the same words. A
- * quoted argument with a space (`node -e "a b"`) does not survive the round trip; skipping the case is
- * better than failing the dry run on a config that the plugin accepts.
+ * One declared prefix proves `trusted_commands` reaches `decide`. Prefixes that a hard-ask or a guard
+ * overrides cannot demonstrate trust, so the first prefix that actually yields `trust` is used. When
+ * every prefix is overridden, the case is a skip: the config is valid, there is just nothing to prove.
+ *
+ * `inspect` reports the list already tokenized, so a command is rebuilt only when joining the tokens
+ * reproduces the same words. A quoted argument with a space (`node -e "a b"`) does not survive the
+ * round trip; skipping it is better than failing the dry run on a config that the plugin accepts.
  */
-function trustedDryRunCase(trustedCommands: readonly (readonly string[])[]): DryRunCase[] {
-  const prefix = trustedCommands[0];
-  if (prefix === undefined) return [];
+function trustedDryRunCase(trustedCommands: readonly (readonly string[])[], cwd: string): DryRunCase[] {
+  const commands = trustedCommands.flatMap((prefix) => {
+    const command = prefix.join(" ");
+    return tokenize(command).join("\u0000") === prefix.join("\u0000") ? [command] : [];
+  });
+  const first = commands[0];
+  if (first === undefined) return [];
 
-  const command = prefix.join(" ");
-  if (tokenize(command).join("\u0000") !== prefix.join("\u0000")) return [];
-  return [{ command, verdict: "allow", source: "allowlist", rule: "trust" }];
+  const trusted = commands.find((command) => {
+    const decision = decide([command], cwd, { trustedCommands });
+    return decision.verdict === "allow" && decision.source === "allowlist" && decision.rule === "trust";
+  });
+  return [
+    {
+      command: trusted ?? first,
+      verdict: "allow",
+      source: "allowlist",
+      rule: "trust",
+      optional: trusted === undefined,
+    },
+  ];
 }
 
 function errorMessage(error: unknown): string {

@@ -113,6 +113,33 @@ test("verify dry-runs a declared trusted command", (t) => {
   assert.match(result.stdout, /verify: ok/);
 });
 
+test("verify skips trusted prefixes that hard-ask before a usable one", (t) => {
+  const directory = scratch(t);
+  const config = writeConfig(
+    directory,
+    configWith(REPO_ROOT, { enabled: true, trusted_commands: ["sudo ls", "npm test"] }),
+  );
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PASS npm test -> allow \/ allowlist \/ trust/);
+  assert.doesNotMatch(result.stdout, /FAIL/);
+  assert.match(result.stdout, /verify: ok/);
+});
+
+test("verify skips the trusted dry run when every prefix is overridden", (t) => {
+  const directory = scratch(t);
+  const config = writeConfig(directory, configWith(REPO_ROOT, { enabled: true, trusted_commands: ["sudo ls"] }));
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /SKIP sudo ls -> ask \/ hard-ask \/ sudo/);
+  assert.doesNotMatch(result.stdout, /FAIL/);
+  assert.match(result.stdout, /verify: ok/);
+});
+
 test("verify warns but stays green when external_directory is stricter than asked", (t) => {
   const directory = scratch(t);
   const deny = DENY_RESOURCES.map(
