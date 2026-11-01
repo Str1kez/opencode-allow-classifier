@@ -41,7 +41,8 @@ shell-ресурсом: смену каталога (`cd /tmp`) и чтение/
   ],
   "plugins": [
     {
-      "package": "@str1kez/opencode-allow-classifier",
+      // Пакет не опубликован: путь к каталогу пакета с package.json, не к src/index.ts.
+      "package": "/абсолютный/путь/к/opencode-allow-classifier",
       "options": {
         "enabled": true,
         // Модель классификатора; без опции — выбор из /classifier, затем дефолт.
