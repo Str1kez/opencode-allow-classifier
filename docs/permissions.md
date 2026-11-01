@@ -83,11 +83,31 @@
    `--no-pager`, `--git-dir`). Поэтому `git -C /tmp push` и `FOO=1 sudo`
    остаются hard-ask.
 2. **Allowlist с гардом** — `allow` без модели: `ls`, `pwd`, `cat`, `head`,
-   `tail`, `wc`, `file`, `stat`, `du`, `df`, `which`, `echo`, `date`,
-   `whoami`, `uname`, `rg`, `grep`, `jq`, `find`, `git status`, `git diff`,
-   `git log`, `git show`, `git branch` (только листинговые флаги),
-   `git remote -v`, `git rev-parse`, `git blame`, `git stash list`. `sed`,
-   `awk`, `env` в allowlist не входят.
+   `tail`, `wc`, `cut`, `tr`, `nl`, `strings`, `printf`, `true`, `sleep`,
+   `sort` без `-o`/`--output` и без `--compress-program` (`sort -T .` пишет
+   временные файлы внутри cwd и удаляет их сам), `file`, `stat`, `du`, `df`,
+   `which`, `echo`, `date`, `whoami`, `uname`, `rg`, `grep`, `jq`, `find`,
+   `sed -n 'Np'` и `sed -n 'N,Mp'`
+   (только диапазон печати: `-i`, `-e`, `w`, `s///` и шаг `1~2p` уходят
+   к классификатору),
+   `gh --version` и `gh` с группами `issue`, `pr`, `repo`, `run`, `release`,
+   `workflow` и глаголами `view`/`list` (только они: `gh api`, `gh auth`,
+   `gh issue close` и `gh pr merge` уходят к классификатору),
+   `git status`, `git diff`, `git log`, `git show`, `git branch` (только
+   листинговые флаги), `git remote -v`, `git remote get-url`,
+   `git rev-parse`, `git blame`, `git stash list`, `git worktree list`,
+   `git merge-base`, `git ls-files`, `git rev-list`, `git for-each-ref`,
+   `git config --get`, `git describe`, `git shortlog`. `awk`, `env` и `cd`
+   в allowlist не входят: `awk` и `env` исполняют чужой код, а `cd`
+   рассинхронизирует проверку путей с реальным каталогом.
+   У git глобальные флаги (`-C`, `--no-pager`, `--git-dir`) не мешают
+   сопоставлению с allowlist: `git -C ./sub log` разрешён. Путь из `-C`,
+   `--git-dir` и `--work-tree` проверяет гард `outside-cwd`, поэтому
+   `git -C /tmp log` спрашивает. `git -c`, `--config-env` и `--exec-path=`
+   тоже пропускаются к allowlist, но их отменяет гард
+   `git-command-override`: значение конфига может называть программу
+   (`core.pager`, `diff.external`, `alias.*`), а `--exec-path=` указывает,
+   откуда брать исполняемую подкоманду. Такая команда read-only не является.
    `find` разрешён только как обход: `-exec` проходит, если запускает
    read-only программу (`cat`, `grep`, `rg`, `wc` и т. п.) из доверенного
    каталога и без собственных опасных флагов; `-delete`, `-fprint`, `-fprintf`,
@@ -198,10 +218,18 @@
   `rg -u`/`-uuu`/`-a`/`--hidden`/`--no-ignore*`/`--binary`/`--follow`
   (`guard:rg-unrestricted`) и `grep -r`/`-R` с корнем в cwd
   (`guard:recursive-search`);
-- запись в файл: `>`/`>>` с целью-путём, `tee`, `-o` у `git` и `--output`.
-  Редирект в поток (`2>&1`, `>&2`, `2>/dev/null`, `1>/dev/null`, `>/dev/null`)
-  записью не считается и allowlist не отменяет;
-- исполнение чужих программ: `rg --pre`, `git --ext-diff`/`--textconv`;
+- запись в файл: `>`/`>>` с целью-путём, `tee`, `-o` у `git`, `--output`,
+  `sort -o`/`sort --output` (`guard:sort-output`). Редирект в поток (`2>&1`,
+  `>&2`, `2>/dev/null`, `1>/dev/null`, `>/dev/null`) записью не считается и
+  allowlist не отменяет;
+- подмена того, что запускает git: `git -c key=value`, `git --config-env=VAR key`
+  и `git --exec-path=DIR` (`guard:git-command-override`) — конфиг может
+  называть программу, а `--exec-path` меняет каталог подкоманд; отдельно
+  `git --paginate` (`guard:git-pager-override`) принудительно запускает pager
+  из конфига;
+- исполнение чужих программ: `rg --pre`, `git --ext-diff`/`--textconv`,
+  `sort --compress-program` (включая сокращённое `--compress-p`) — sort
+  запускает указанную программу на временных файлах;
 - чтение файла в обход позиционного аргумента: `--contents`, `--slurpfile`,
   `--rawfile`, `--from-file`, `jq -f` (jq-программа может напечатать `env`);
 - команды, которые меняют состояние, притворяясь чтением: `date -s`/
@@ -283,6 +311,22 @@ System-контекст — отдельный остаточный риск. Е
 - `git log --format=%x1b`, `date -s`, `cat /dev/urandom`, `tail -f` спрашивают.
 - `cat README.md\n` (хвостовой перевод строки от сканера) больше не
   спрашивает.
+- `sed -n '1,120p' README.md`, `gh issue view 7`, `gh pr list`,
+  `git worktree list`, `cut`, `tr`, `nl`, `strings`, `printf`, `true`,
+  `sleep` и `sort` без `-o` больше не спрашивают.
+- `git -C ./sub log` разрешён, `git -C /tmp log` спрашивает с
+  `guard:outside-cwd`.
+- `sort -o out.txt file` спрашивает с `guard:sort-output`;
+  `sort --compress-program=./evil big.txt` — с
+  `guard:sort-compress-program`; `git -c core.pager=cat log` — с
+  `guard:git-command-override`.
+- `git --exec-path=. log` спрашивает с `guard:git-command-override`, а
+  `git --exec-path evil log` уходит к классификатору: пробельная форма
+  `--exec-path` не задаёт путь.
+- `git --paginate log` спрашивает с `guard:git-pager-override`:
+  принудительный pager берёт программу из конфига. `git --paginate push`
+  остаётся hard-ask: глобальные флаги пропускаются до проверки `git push`.
+- `cd /tmp` по-прежнему спрашивает: `cd` в allowlist не входит.
 
 ## Аудит
 

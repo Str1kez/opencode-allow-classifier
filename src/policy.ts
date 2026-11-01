@@ -62,10 +62,23 @@ const WRAPPER_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir", "-o", "--
  * Global flags that stand between a program and its subcommand. Values are written as separate tokens
  * (`git -C /tmp push`) or attached (`--git-dir=/x`), which is why both forms are handled.
  */
-const PROGRAM_GLOBAL_FLAGS: Readonly<Record<string, { readonly withValue: readonly string[]; readonly boolean: readonly string[] }>> = {
+interface GlobalFlags {
+  readonly withValue: readonly string[];
+  readonly boolean: readonly string[];
+  /**
+   * Flags that take a value only attached (`--flag=value`). The spaced form is not a value: git
+   * accepts `--exec-path=X` only, so `git --exec-path foo log` never runs `log` and must not match it.
+   */
+  readonly attachedValue?: readonly string[];
+}
+
+const PROGRAM_GLOBAL_FLAGS: Readonly<Record<string, GlobalFlags>> = {
   git: {
-    withValue: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"],
+    withValue: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"],
+    // `--paginate` stays here so hard-ask still sees `git --paginate push`; the allowlist never
+    // benefits from it because the `git-pager-override` guard fires on the same flag.
     boolean: ["--no-pager", "--paginate", "--bare", "--literal-pathspecs", "--no-replace-objects", "--no-optional-locks"],
+    attachedValue: ["--exec-path"],
   },
   npm: {
     withValue: ["--prefix", "--registry", "--cache", "--userconfig", "--loglevel", "--workspace", "-w"],
@@ -116,10 +129,10 @@ function commandOf(tokens: ReadonlyArray<string>): { readonly program: string; r
   return undefined;
 }
 
-/** Drops global flags so `git -C /tmp push` and `npm --prefix . install` match their subcommand. */
-function skipGlobalFlags(program: string, args: ReadonlyArray<string>): ReadonlyArray<string> {
+/** Number of leading tokens the program parses as its own global flags before the subcommand. */
+function globalFlagsLength(program: string, args: ReadonlyArray<string>): number {
   const flags = PROGRAM_GLOBAL_FLAGS[program];
-  if (flags === undefined) return args;
+  if (flags === undefined) return 0;
 
   let index = 0;
   while (index < args.length) {
@@ -128,6 +141,12 @@ function skipGlobalFlags(program: string, args: ReadonlyArray<string>): Readonly
 
     if (flags.withValue.includes(name)) {
       index += token.includes("=") ? 1 : 2;
+      continue;
+    }
+    if (flags.attachedValue?.includes(name) === true) {
+      // The spaced form is not a global flag at all; stop here so the allowlist does not match.
+      if (!token.includes("=")) break;
+      index++;
       continue;
     }
     if (flags.boolean.includes(token)) {
@@ -145,7 +164,12 @@ function skipGlobalFlags(program: string, args: ReadonlyArray<string>): Readonly
     break;
   }
 
-  return args.slice(index);
+  return index;
+}
+
+/** Drops global flags so `git -C /tmp push` and `npm --prefix . install` match their subcommand. */
+function skipGlobalFlags(program: string, args: ReadonlyArray<string>): ReadonlyArray<string> {
+  return args.slice(globalFlagsLength(program, args));
 }
 
 function segmentOf(text: string): Segment {
@@ -191,19 +215,43 @@ function matchesHardAsk(rule: HardAskRule, tokens: ReadonlyArray<string>, cwd: s
   return rule.arguments.some((run) => run.every((expected, index) => args[index] === expected));
 }
 
+/**
+ * The allowlist sees the command after the program's own global flags. `git -C dir log` is `git log`
+ * with a path the outside-cwd guard still checks; `git -c key=value log` is skipped here too and then
+ * caught by the `git-command-override` guard, because a config value can name a program to run.
+ */
+function allowlistTokens(tokens: ReadonlyArray<string>): ReadonlyArray<string> {
+  const first = tokens[0];
+  if (first === undefined) return tokens;
+  return [first, ...skipGlobalFlags(programOf(first), tokens.slice(1))];
+}
+
 function matchesAllowlist(rule: AllowlistRule, tokens: ReadonlyArray<string>): boolean {
-  if (tokens.length < rule.prefix.length) return false;
+  const effective = allowlistTokens(tokens);
+  if (effective.length < rule.prefix.length) return false;
 
   for (let index = 0; index < rule.prefix.length; index++) {
     const expected = rule.prefix[index];
-    const actual = index === 0 ? programOf(tokens[0]) : tokens[index];
+    const actual = index === 0 ? programOf(effective[0]) : effective[index];
     if (expected !== actual) return false;
   }
 
-  if (rule.exact === true && tokens.length !== rule.prefix.length) return false;
+  if (rule.exact === true && effective.length !== rule.prefix.length) return false;
+
+  const args = effective.slice(rule.prefix.length);
+
+  if (rule.script !== undefined) {
+    const script = args[0];
+    if (script === undefined || !rule.script.test(script)) return false;
+    // Everything after the script must be a file operand. Any flag (`-i`, `-e`) and the `--`
+    // terminator reject the rule: `sed -n '1p' file -i` still edits in place, and the terminator is
+    // not worth reasoning about.
+    if (args.slice(1).some((token) => token.startsWith("-") && token !== "-")) return false;
+  }
+
   if (rule.allowedTokens === undefined) return true;
 
-  return tokens.slice(rule.prefix.length).every((token) => rule.allowedTokens?.includes(token) === true);
+  return args.every((token) => rule.allowedTokens?.includes(token) === true);
 }
 
 /**
@@ -395,6 +443,18 @@ function matchesGuard(rule: GuardRule, segment: Segment, cwd: string, realpath: 
       return hasRgUnrestrictedFlag(segment.tokens);
     case "cwd-root-search":
       return searchesCwdRecursively(segment.tokens, cwd);
+    case "git-command-override": {
+      // Only the global region counts: `git log -c` is git's combined-diff flag, not a config override.
+      const args = segment.tokens.slice(1);
+      const globalFlags = args.slice(0, globalFlagsLength("git", args));
+      return globalFlags.some(
+        (token) =>
+          (token.startsWith("-c") && !token.startsWith("--")) ||
+          longFlagName(token) === "--config-env" ||
+          // Bare `--exec-path` only prints the path; the `=` form points the lookup elsewhere.
+          token.startsWith("--exec-path="),
+      );
+    }
     case "find-exec": {
       // A read-only program can still carry a dangerous flag: `find . -exec grep -r x {} \;` recurses
       // into a directory and reads the files its name never mentions. Run the spawned argv through

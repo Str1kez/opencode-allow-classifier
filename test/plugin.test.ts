@@ -353,6 +353,203 @@ test("allowlist does not allow commands it cannot prove read-only", async () => 
   }
 });
 
+test("sed allows only the bare print range", async () => {
+  const harness = await start();
+  try {
+    assert.equal(await verdict(harness, ["sed -n '1,120p' README.md"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "sed");
+
+    const asked = [
+      "sed -i s/a/b/ file",
+      "sed -e 's/x/y/' file",
+      "sed -n 's/x/y/p' file",
+      "sed -n '1,120p' file -i",
+      "sed -n '1~2p' file",
+    ];
+    for (const command of asked) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("gh allows only view and list on the read-only command groups", async () => {
+  const harness = await start();
+  const allowed: ReadonlyArray<readonly [string, string]> = [
+    ["gh issue view 7", "gh-issue-view"],
+    ["gh issue list", "gh-issue-list"],
+    ["gh pr view 7", "gh-pr-view"],
+    ["gh pr list", "gh-pr-list"],
+    ["gh repo view", "gh-repo-view"],
+    ["gh repo list", "gh-repo-list"],
+    ["gh run view 12", "gh-run-view"],
+    ["gh run list", "gh-run-list"],
+    ["gh release view v1", "gh-release-view"],
+    ["gh release list", "gh-release-list"],
+    ["gh workflow view ci.yml", "gh-workflow-view"],
+    ["gh workflow list", "gh-workflow-list"],
+    ["gh --version", "gh-version"],
+  ];
+  const asked = [
+    "gh api user",
+    "gh issue close 7",
+    "gh issue create",
+    "gh pr merge 7",
+    "gh run watch",
+    "gh auth status",
+  ];
+
+  try {
+    for (const [command, rule] of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+    for (const command of asked) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("git read subcommands are allowed", async () => {
+  const harness = await start();
+  const allowed: ReadonlyArray<readonly [string, string]> = [
+    ["git worktree list", "git-worktree-list"],
+    ["git remote get-url origin", "git-remote-get-url"],
+    ["git merge-base --is-ancestor a b", "git-merge-base"],
+    ["git ls-files", "git-ls-files"],
+    ["git rev-list HEAD", "git-rev-list"],
+    ["git for-each-ref", "git-for-each-ref"],
+    ["git config --get user.name", "git-config-get"],
+    ["git describe --tags", "git-describe"],
+    ["git shortlog -sn", "git-shortlog"],
+  ];
+  const asked = [
+    "git config user.name",
+    "git remote set-url origin x",
+    "git worktree add ../x",
+    "git config --get-all user.name",
+  ];
+
+  try {
+    for (const [command, rule] of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+    for (const command of asked) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("git global flags do not block the allowlist and -C stays inside cwd", async () => {
+  const harness = await start();
+  const guarded: ReadonlyArray<readonly [string, string]> = [
+    ["git -C /tmp log", "guard:outside-cwd"],
+    ["git -C ../other log", "guard:outside-cwd"],
+    ["git -C/tmp log", "guard:outside-cwd"],
+    ["git --git-dir=/tmp/repo status", "guard:outside-cwd"],
+    ["git -c core.pager=cat log", "guard:git-command-override"],
+    ["git --config-env=FOO log", "guard:git-command-override"],
+    ["git --exec-path=. log", "guard:git-command-override"],
+  ];
+
+  try {
+    assert.equal(await verdict(harness, ["git -C ./sub log --oneline -1"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "git-log");
+    assert.equal(await verdict(harness, ["git --no-pager diff --stat"]), "allow");
+    assert.equal(await verdict(harness, ["git -Csub status"]), "allow");
+    assert.equal(await verdict(harness, ["git --git-dir=.git status"]), "allow");
+
+    for (const [command, rule] of guarded) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    // A spaced `--exec-path` is not a value for git, so the shape falls through to the classifier.
+    const spacedExecPath = evaluation({ resources: ["git --exec-path evil log"] });
+    await harness.evaluate(spacedExecPath);
+    assert.equal(spacedExecPath.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "classifier");
+
+    // `--paginate` is still skipped for hard-ask, which must keep seeing `push` behind it.
+    const paginatePush = evaluation({ resources: ["git --paginate push"] });
+    await harness.evaluate(paginatePush);
+    assert.equal(paginatePush.effect, "ask");
+    const pushEntry = harness.auditEntries().at(-1);
+    assert.deepEqual(
+      { source: pushEntry?.["source"], rule: pushEntry?.["rule"] },
+      { source: "hard-ask", rule: "git-push" },
+    );
+
+    // The same flag forces a pager named in config, so the allowlist must not skip it silently.
+    const paginateLog = evaluation({ resources: ["git --paginate log"] });
+    await harness.evaluate(paginateLog);
+    assert.equal(paginateLog.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "guard:git-pager-override");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("pipeline helpers are allowed and sort cannot write a file", async () => {
+  const harness = await start();
+  const allowed: ReadonlyArray<readonly [string, string]> = [
+    ["cut -d, -f2 file", "cut"],
+    ["tr a-z A-Z", "tr"],
+    ["nl README.md", "nl"],
+    ["strings ./bin", "strings"],
+    ["printf '%s\\n' x", "printf"],
+    ["true", "true"],
+    ["sleep 1", "sleep"],
+    ["sort file", "sort"],
+    ["sort -n file", "sort"],
+  ];
+  const asked: ReadonlyArray<readonly [string, string]> = [
+    ["sort -o out.txt file", "guard:sort-output"],
+    ["sort --output=out.txt file", "guard:sort-output"],
+    ["sort -ro out.txt file", "guard:sort-output"],
+    ["sort --compress-program=./evil big.txt", "guard:sort-compress-program"],
+    ["sort --compress-program ./evil big.txt", "guard:sort-compress-program"],
+    ["sort --compress-p ./evil big.txt", "guard:sort-compress-program"],
+  ];
+
+  try {
+    for (const [command, rule] of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+    for (const [command, rule] of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("cd stays out of the allowlist and a read-only pipeline is allowed", async () => {
+  const harness = await start();
+  try {
+    assert.equal(await verdict(harness, ["sort file", "cut -d, -f2"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "sort,cut");
+
+    for (const command of ["cd /tmp", "cd ..", "cd src"]) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("guard cancels the allowlist for secrets and writes", async () => {
   const harness = await start();
   const cases: ReadonlyArray<readonly [ReadonlyArray<string>, string]> = [
