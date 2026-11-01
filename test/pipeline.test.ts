@@ -67,6 +67,21 @@ test("0.9 allows an unknown command, 0.89 asks", async () => {
   assert.equal(asked.probability, 0.89);
 });
 
+test("an empty trusted prefix never allows a command", async () => {
+  // `decide` is public: a caller can bypass the option parser. An empty token list must not match,
+  // otherwise `[].every(...)` would allow every command with `rule: trust`.
+  const model = recorder(ok(0.1));
+  const decision = await evaluate(
+    { ...REQUEST, resources: ["rm -rf src"] },
+    { ...options(model.ask), trustedCommands: [[]] },
+  );
+
+  assert.equal(decision.verdict, "ask");
+  assert.equal(decision.source, "model");
+  assert.equal(decision.rule, "classifier");
+  assert.equal(model.calls.length, 1);
+});
+
 test("the configured threshold moves the allow boundary", async () => {
   const strict = recorder(ok(0.95));
   const asked = await evaluate(

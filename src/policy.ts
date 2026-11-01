@@ -8,6 +8,7 @@ import {
   type HardAskRule,
 } from "./rules.ts";
 import { findExecCommands } from "./find.ts";
+import type { TrustedCommand } from "./settings.ts";
 import {
   escapesCwd,
   isPathLike,
@@ -258,6 +259,20 @@ function matchesAllowlist(rule: AllowlistRule, tokens: ReadonlyArray<string>): b
 }
 
 /**
+ * A user-declared prefix matches the typed tokens verbatim: same length or longer, every declared
+ * token equal. No globs, no basename magic, no skipped global flags — `npm test` does not trust
+ * `npm --prefix . test`, and `/usr/bin/npm test` never matches a bare `npm test`. A wider prefix is
+ * the operator's call, and the hard-ask and guard stages already ran before this one.
+ */
+function matchesTrusted(trusted: TrustedCommand, tokens: ReadonlyArray<string>): boolean {
+  // `decide` is a public seam: callers may pass prefixes that never went through `parseTrustedCommands`.
+  // An empty prefix must never match, even though the option parser already rejects one.
+  if (trusted.length < 2) return false;
+  if (tokens.length < trusted.length) return false;
+  return trusted.every((expected, index) => tokens[index] === expected);
+}
+
+/**
  * Every shape the shell could hand to the program: the raw resource, the same text with quotes removed
  * (`cat ".en""v"` is `.env`), the glued tokens, and the text with backslash escapes resolved
  * (`cat .\env` is `cat .env`). A guard fires when any of them matches.
@@ -477,6 +492,14 @@ function finish(decision: Omit<Decision, "latency">, started: number): Decision 
   return { ...decision, latency: Math.round((performance.now() - started) * 100) / 100 };
 }
 
+/** Optional inputs to `decide` beyond the resources and the working directory. */
+export interface DecideOptions {
+  /** Resolves symlinks for the path guards; without it they compare strings. */
+  readonly realpath?: RealPathResolver;
+  /** User-declared prefixes, already validated by `parseTrustedCommands`. Empty means stock behaviour. */
+  readonly trustedCommands?: ReadonlyArray<TrustedCommand>;
+}
+
 /**
  * Verdict for a whole evaluation. Every resource is normalized before any gate: stream redirections
  * are blanked (see `stripStreamRedirects`) because they write no file, so `2>&1` cannot turn a
@@ -487,14 +510,21 @@ function finish(decision: Omit<Decision, "latency">, started: number): Decision 
  * otherwise `python3 -c … ; cat ~/.ssh/id_rsa` reaches the model while the reversed order is caught,
  * and adding one unknown word to a compound disarms the deterministic protection.
  *
+ * The allowlist stage also honours `trustedCommands`: prefixes the operator declared in
+ * `trusted_commands`. They are matched after the built-in table, so a command the plugin already
+ * proves read-only keeps its own rule name, and a user prefix can only add `allow` for commands the
+ * built-in table does not know. Hard-ask and guards have already run on every segment by then, so a
+ * declared `sudo ls` or `cat .env` still asks.
+ *
  * `realpath` is only used to see through symlinks; without it the path guards compare strings.
  */
 export function decide(
   resources: ReadonlyArray<string>,
   cwd: string,
-  realpath?: RealPathResolver,
+  options: DecideOptions = {},
 ): Decision {
   const started = performance.now();
+  const realpath = options.realpath;
   const segments: Segment[] = resources.map(normalizedSegment);
 
   if (segments.length === 0) {
@@ -518,15 +548,18 @@ export function decide(
     }
   }
 
+  const trusted = options.trustedCommands ?? [];
   const allowlistRules: string[] = [];
 
   for (const segment of segments) {
     const rule = ALLOWLIST_RULES.find((candidate) => matchesAllowlist(candidate, segment.tokens));
-    if (rule === undefined) {
+    const name =
+      rule?.name ?? (trusted.some((command) => matchesTrusted(command, segment.tokens)) ? "trust" : undefined);
+    if (name === undefined) {
       return finish({ verdict: "ask", source: "default", rule: "no-allowlist-match", probability: null, model: null }, started);
     }
 
-    if (!allowlistRules.includes(rule.name)) allowlistRules.push(rule.name);
+    if (!allowlistRules.includes(name)) allowlistRules.push(name);
   }
 
   return finish(

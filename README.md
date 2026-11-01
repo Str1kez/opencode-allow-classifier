@@ -69,7 +69,8 @@
         "enabled": true,
         "threshold": 0.9,
         "timeout_ms": 3000,
-        "include_system_context": false
+        "include_system_context": false,
+        "trusted_commands": ["npm test", "npm run typecheck", "node --test"]
       }
     }
   ]
@@ -97,11 +98,14 @@
 | `threshold` | number | `0.9` | Порог вероятности в `(0, 1]`. `probability >= threshold` даёт `allow`. |
 | `timeout_ms` | integer | `3000` | Общий бюджет вызовов модели в миллисекундах, от 1 до 60000. Включает повтор. |
 | `include_system_context` | boolean | `false` | Отправлять последнее system-сообщение сессии в промпт. Только литеральный `true`. |
+| `trusted_commands` | string[] | `[]` | Префиксы команд, которые в проекте не спрашивают: точные токены, минимум два, без shell-синтаксиса, первые 50 записей. Hard-ask и гарды выигрывают; всё после префикса доверяется. |
 | `audit_dir` | string | state-каталог OpenCode | Куда писать `evaluate-YYYY-MM.jsonl`. |
 
 Невалидное значение не ломает плагин: оно игнорируется, применяется дефолт.
 `model` должна быть decision-моделью: чат-модель не отвечает на операцию
-`decisions`, и каждый вызов останется `ask`.
+`decisions`, и каждый вызов останется `ask`. Битая запись `trusted_commands`
+тоже просто выпадает; границы опции — в
+[docs/permissions.md](docs/permissions.md#trusted_commands).
 
 ## Как это работает
 

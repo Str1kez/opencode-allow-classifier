@@ -260,11 +260,20 @@ export function stripStreamRedirects(raw: string): string {
  * Characters a shell would act on after quotes and escapes are blanked, plus the pattern syntax that
  * makes an allowlist prefix unsafe. A quoted metacharacter is literal and does not count.
  */
-const ACTIVE_SHELL_CHARACTERS = /[;&|`$(){}<>\\!*?\[\]\n]/;
+const ACTIVE_SHELL_CHARACTERS = /[;&|`$(){}<>\\!*?\[\]\n\r]/;
 
 /** True when the raw text still contains shell syntax a read-only rule must not accept. */
 export function hasActiveShellSyntax(raw: string): boolean {
   return ACTIVE_SHELL_CHARACTERS.test(shellActiveText(raw));
+}
+
+/**
+ * True when `raw` contains whitespace beyond a plain space or tab. `tokenize` splits on every `\s`,
+ * so a newline, CR, NBSP, form feed or U+2028 inside a declared prefix would silently change its token
+ * sequence. A trusted prefix must stay one command, so it may separate words with spaces and tabs only.
+ */
+export function hasForeignWhitespace(raw: string): boolean {
+  return /[^\S \t]/.test(raw);
 }
 
 /**
