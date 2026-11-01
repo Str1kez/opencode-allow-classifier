@@ -1,9 +1,10 @@
 /**
  * Plans a merge into an existing config.
  *
- * Only missing pieces are added: the catch-all, the required deny rules and the plugin entry.
- * Foreign rules, existing denies, user option values, comments and formatting stay in place.
- * Permission order is load-bearing, so a broken order is a conflict, never a silent rewrite.
+ * Only missing pieces are added: the catch-all, the `external_directory` ask rule, the required deny
+ * rules and the plugin entry. Foreign rules, existing denies, user option values, comments and
+ * formatting stay in place. Permission order is load-bearing, so a broken order is a conflict, never
+ * a silent rewrite.
  */
 
 import {
@@ -18,7 +19,7 @@ import {
   replaceNode,
 } from "./jsonc.ts";
 import type { JsoncArrayNode, JsoncDocument, JsoncEdit, JsoncNode, JsoncObjectNode } from "./jsonc.ts";
-import { CATCH_ALL_RULE, DENY_RULES, PLUGIN_OPTIONS, isPackageReference } from "./layout.ts";
+import { CATCH_ALL_RULE, DENY_RULES, EXTERNAL_DIRECTORY_RULE, PLUGIN_OPTIONS, isPackageReference } from "./layout.ts";
 import type { PermissionRule } from "./layout.ts";
 
 export type PluginChange = "kept" | "added" | "added-options" | "replaced-string";
@@ -29,6 +30,8 @@ export interface MergeAdditions {
   /** The whole `plugins` array was added. */
   readonly pluginsArray: boolean;
   readonly catchAll: boolean;
+  /** The `external_directory * → ask` rule was appended. */
+  readonly externalDirectory: boolean;
   /** Resources of the deny rules that were appended. */
   readonly denyRules: readonly string[];
   readonly plugin: PluginChange;
@@ -61,6 +64,7 @@ interface MutableAdditions {
   permissionsArray: boolean;
   pluginsArray: boolean;
   catchAll: boolean;
+  externalDirectory: boolean;
   denyRules: string[];
   plugin: PluginChange;
   pluginString?: string;
@@ -75,6 +79,7 @@ export function planMerge(document: JsoncDocument, packageRoot: string): MergeRe
     permissionsArray: false,
     pluginsArray: false,
     catchAll: false,
+    externalDirectory: false,
     denyRules: [],
     plugin: "kept",
   };
@@ -103,6 +108,7 @@ function planPermissions(
     rootMembers.push(`"permissions": ${permissionsArrayText(document, root)}`);
     additions.permissionsArray = true;
     additions.catchAll = true;
+    additions.externalDirectory = true;
     additions.denyRules.push(...DENY_RULES.map((rule) => rule.resource));
     return null;
   }
@@ -122,6 +128,24 @@ function planPermissions(
   if (catchAll !== undefined && catchAll.index !== firstShellIndex) {
     return orderConflict(document, array, catchAll, firstShellIndex, packageRoot);
   }
+
+  const externalRules = rules.filter(isExternalDirectoryCatchAll);
+  if (externalRules.length > 1) {
+    return conflict(
+      `multiple external_directory rules at indexes ${externalRules.map((rule) => rule.index).join(", ")}`,
+    );
+  }
+
+  const external = externalRules[0];
+  if (external !== undefined && external.effect !== EXTERNAL_DIRECTORY_RULE.effect) {
+    return conflict(
+      `required external_directory rule ${JSON.stringify(EXTERNAL_DIRECTORY_RULE.resource)} exists with effect ${JSON.stringify(external.effect ?? "missing")}`,
+    );
+  }
+  const missingExternal = external === undefined;
+  // Insert the catch-all before any foreign external_directory rule, so a narrower allow/deny still
+  // wins by the last-match rule. A rule inserted after them would silently nullify their exceptions.
+  const firstExternalIndex = rules.find((rule) => rule.action === EXTERNAL_DIRECTORY_RULE.action)?.index ?? null;
 
   const missing: PermissionRule[] = [];
   for (const required of DENY_RULES) {
@@ -146,20 +170,40 @@ function planPermissions(
   }
 
   const denyTexts = missing.map(ruleText);
+  const externalTexts = missingExternal ? [ruleText(EXTERNAL_DIRECTORY_RULE)] : [];
+
   if (catchAll === undefined) {
-    const insertIndex = firstShellIndex ?? array.items.length;
+    const shellInsert = firstShellIndex ?? array.items.length;
+    const insertIndex =
+      missingExternal && firstExternalIndex !== null ? Math.min(shellInsert, firstExternalIndex) : shellInsert;
+    const leading = [ruleText(CATCH_ALL_RULE), ...externalTexts];
     if (insertIndex === array.items.length) {
-      edits.push(insertArrayItems(document, array, insertIndex, [ruleText(CATCH_ALL_RULE), ...denyTexts]));
+      edits.push(insertArrayItems(document, array, insertIndex, [...leading, ...denyTexts]));
       additions.denyRules.push(...missing.map((rule) => rule.resource));
     } else {
-      edits.push(insertArrayItems(document, array, insertIndex, [ruleText(CATCH_ALL_RULE)]));
+      edits.push(insertArrayItems(document, array, insertIndex, leading));
       if (denyTexts.length > 0) {
         edits.push(insertArrayItems(document, array, array.items.length, denyTexts));
         additions.denyRules.push(...missing.map((rule) => rule.resource));
       }
     }
     additions.catchAll = true;
+    additions.externalDirectory = missingExternal;
     return null;
+  }
+
+  if (externalTexts.length > 0) {
+    const insertIndex = firstExternalIndex ?? catchAll.index + 1;
+    // Both insertions would land at the array end when the catch-all is the last item; two edits at
+    // the same offset produce `rule,rule` without a separator. Combine them.
+    if (insertIndex === array.items.length) {
+      edits.push(insertArrayItems(document, array, array.items.length, [...externalTexts, ...denyTexts]));
+      additions.externalDirectory = true;
+      additions.denyRules.push(...missing.map((rule) => rule.resource));
+      return null;
+    }
+    edits.push(insertArrayItems(document, array, insertIndex, externalTexts));
+    additions.externalDirectory = true;
   }
 
   if (denyTexts.length > 0) {
@@ -300,6 +344,10 @@ function isCatchAll(rule: RuleInfo): boolean {
   );
 }
 
+function isExternalDirectoryCatchAll(rule: RuleInfo): boolean {
+  return rule.action === EXTERNAL_DIRECTORY_RULE.action && rule.resource === EXTERNAL_DIRECTORY_RULE.resource;
+}
+
 function referencesPackage(entry: JsoncNode, packageRoot: string): boolean {
   if (entry.type === "string") return isPackageReference(entry.value as string, packageRoot);
   if (entry.type !== "object") return false;
@@ -316,7 +364,7 @@ function readString(object: JsoncObjectNode, key: string): string | null {
 function permissionsArrayText(document: JsoncDocument, root: JsoncObjectNode): string {
   const childIndent = childIndentOf(document.text, root);
   const ruleIndent = childIndent + "  ";
-  const rules = [CATCH_ALL_RULE, ...DENY_RULES].map(ruleText).join(`,\n${ruleIndent}`);
+  const rules = [CATCH_ALL_RULE, EXTERNAL_DIRECTORY_RULE, ...DENY_RULES].map(ruleText).join(`,\n${ruleIndent}`);
   return `[\n${ruleIndent}${rules}\n${childIndent}]`;
 }
 

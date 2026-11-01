@@ -26,6 +26,7 @@ function cleanConfig(packageRoot: string): string {
   "$schema": "https://opencode.ai/config.json",
   "permissions": [
     { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
 ${deny}
   ],
   "plugins": [
@@ -211,7 +212,9 @@ test("inspect reports a clean installed config as text and JSON", (t) => {
   assert.match(text.stdout, new RegExp(`config: ${config.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.match(text.stdout, /exists: yes/);
   assert.match(text.stdout, /0: shell "\*" -> ask \(catch-all\)/);
+  assert.match(text.stdout, /1: external_directory "\*" -> ask/);
   assert.match(text.stdout, /catch-all first among shell rules: yes/);
+  assert.match(text.stdout, /external directory ask rule: yes/);
   assert.match(text.stdout, /deny rules after catch-all: yes/);
   assert.match(text.stdout, /plugin entry: object/);
   assert.match(text.stdout, /plugin options: object/);
@@ -225,6 +228,7 @@ test("inspect reports a clean installed config as text and JSON", (t) => {
     exists: boolean;
     rules: Array<{ index: number; action: string; resource: string; effect: string; catchAll: boolean; valid: boolean }>;
     catchAll: { present: boolean; index: number; firstAmongShell: boolean };
+    externalDirectory: { present: boolean; index: number | null; effect: string | null };
     denyAfterCatchAll: boolean;
     missingDenyRules: string[];
     plugin: {
@@ -240,7 +244,7 @@ test("inspect reports a clean installed config as text and JSON", (t) => {
 
   assert.equal(report.path, config);
   assert.equal(report.exists, true);
-  assert.equal(report.rules.length, 7);
+  assert.equal(report.rules.length, 8);
   assert.deepEqual(report.rules[0], {
     index: 0,
     action: "shell",
@@ -249,7 +253,16 @@ test("inspect reports a clean installed config as text and JSON", (t) => {
     catchAll: true,
     valid: true,
   });
+  assert.deepEqual(report.rules[1], {
+    index: 1,
+    action: "external_directory",
+    resource: "*",
+    effect: "ask",
+    catchAll: false,
+    valid: true,
+  });
   assert.deepEqual(report.catchAll, { present: true, index: 0, firstAmongShell: true });
+  assert.deepEqual(report.externalDirectory, { present: true, index: 1, effect: "ask" });
   assert.equal(report.denyAfterCatchAll, true);
   assert.deepEqual(report.missingDenyRules, []);
   assert.equal(report.plugin.present, true);
@@ -333,6 +346,61 @@ test("inspect reads a commented user config with trailing commas and reports pro
   assert.match(text.stdout, /deny rules after catch-all: no/);
   assert.match(text.stdout, /kill switch: unknown/);
   assert.match(text.stdout, /warnings:/);
+});
+
+test("inspect reports a missing external_directory ask rule", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(
+    config,
+    `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+  ],
+  "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "enabled": true } }],
+}
+`,
+  );
+
+  const json = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(json.status, 0, json.stderr);
+  const report = JSON.parse(json.stdout) as {
+    externalDirectory: { present: boolean; index: number | null; effect: string | null };
+    warnings: string[];
+  };
+  assert.deepEqual(report.externalDirectory, { present: false, index: null, effect: null });
+  assert.ok(report.warnings.some((warning) => /external_directory rule "\*" with effect "ask" is missing/.test(warning)));
+
+  const text = run(["inspect", "--config", config], { cwd: directory });
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /external directory ask rule: no/);
+});
+
+test("inspect reports an external_directory rule with a different effect", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(
+    config,
+    `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "allow" },
+  ],
+  "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "enabled": true } }],
+}
+`,
+  );
+
+  const result = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout) as {
+    externalDirectory: { present: boolean; index: number | null; effect: string | null };
+    warnings: string[];
+  };
+  assert.deepEqual(report.externalDirectory, { present: true, index: 1, effect: "allow" });
+  assert.ok(
+    report.warnings.some((warning) => /external_directory rule "\*" has effect "allow"; expected "ask"/.test(warning)),
+  );
 });
 
 test("inspect does not read the kill switch from a foreign plugin entry", (t) => {

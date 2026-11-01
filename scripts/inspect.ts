@@ -1,6 +1,6 @@
 import { findDuplicateKeys, lastMember, parseJsonc } from "./jsonc.ts";
 import type { JsoncNode, JsoncObjectNode, JsoncScalarNode } from "./jsonc.ts";
-import { CATCH_ALL_RULE, DENY_RULES, isPackageReference } from "./layout.ts";
+import { CATCH_ALL_RULE, DENY_RULES, EXTERNAL_DIRECTORY_RULE, isPackageReference } from "./layout.ts";
 
 type JsoncStringNode = JsoncScalarNode & { readonly type: "string"; readonly value: string };
 
@@ -36,12 +36,19 @@ export interface CatchAllReport {
   readonly firstAmongShell: boolean;
 }
 
+export interface ExternalDirectoryReport {
+  readonly present: boolean;
+  readonly index: number | null;
+  readonly effect: string | null;
+}
+
 export interface InspectReport {
   readonly path: string;
   readonly exists: boolean;
   readonly rootType: JsoncNode["type"] | null;
   readonly rules: readonly RuleReport[];
   readonly catchAll: CatchAllReport;
+  readonly externalDirectory: ExternalDirectoryReport;
   readonly denyAfterCatchAll: boolean;
   readonly missingDenyRules: readonly string[];
   readonly plugin: PluginReport;
@@ -67,6 +74,7 @@ export function inspectConfig(text: string, path: string, packageRoot: string): 
       rootType: root.type,
       rules: [],
       catchAll: { present: false, index: null, firstAmongShell: false },
+      externalDirectory: { present: false, index: null, effect: null },
       denyAfterCatchAll: false,
       missingDenyRules: DENY_RULES.map((rule) => rule.resource),
       plugin: missingPlugin(),
@@ -89,6 +97,25 @@ export function inspectConfig(text: string, path: string, packageRoot: string): 
 
   if (catchAllIndex !== null && !firstAmongShell) {
     warnings.push(`catch-all is not the first shell rule (index ${catchAllIndex}, first shell rule is index ${firstShell})`);
+  }
+
+  const externalDirectoryRules = rules.filter(
+    (rule) => rule.action === EXTERNAL_DIRECTORY_RULE.action && rule.resource === EXTERNAL_DIRECTORY_RULE.resource,
+  );
+  const externalDirectory = externalDirectoryRules[0];
+  if (externalDirectory === undefined) {
+    warnings.push(
+      `external_directory rule ${JSON.stringify(EXTERNAL_DIRECTORY_RULE.resource)} with effect ${JSON.stringify(EXTERNAL_DIRECTORY_RULE.effect)} is missing`,
+    );
+  } else if (externalDirectory.effect !== EXTERNAL_DIRECTORY_RULE.effect) {
+    warnings.push(
+      `external_directory rule ${JSON.stringify(EXTERNAL_DIRECTORY_RULE.resource)} has effect ${JSON.stringify(externalDirectory.effect ?? "missing")}; expected ${JSON.stringify(EXTERNAL_DIRECTORY_RULE.effect)}`,
+    );
+  }
+  if (externalDirectoryRules.length > 1) {
+    warnings.push(
+      `multiple external_directory rules at indexes ${externalDirectoryRules.map((rule) => rule.index).join(", ")}`,
+    );
   }
 
   const denyRules = shellRules.filter((rule) => rule.effect === "deny");
@@ -119,6 +146,11 @@ export function inspectConfig(text: string, path: string, packageRoot: string): 
     rootType: root.type,
     rules,
     catchAll: { present: catchAllIndex !== null, index: catchAllIndex, firstAmongShell },
+    externalDirectory: {
+      present: externalDirectory !== undefined,
+      index: externalDirectory?.index ?? null,
+      effect: externalDirectory?.effect ?? null,
+    },
     denyAfterCatchAll,
     missingDenyRules,
     plugin,
@@ -144,6 +176,9 @@ export function formatInspectText(report: InspectReport): string {
 
   lines.push("checks:");
   lines.push(`  catch-all first among shell rules: ${yesNo(report.catchAll.firstAmongShell)}`);
+  lines.push(
+    `  external directory ask rule: ${yesNo(report.externalDirectory.present && report.externalDirectory.effect === "ask")}`,
+  );
   lines.push(`  deny rules after catch-all: ${yesNo(report.denyAfterCatchAll)}`);
   lines.push(`  plugin entry: ${report.plugin.type}`);
   lines.push(

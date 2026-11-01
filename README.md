@@ -12,6 +12,8 @@
 
 - Read-only команды внутри проекта перестают спрашивать: их отдаёт allowlist,
   а гарды закрывают секреты, чтение вне cwd и запись.
+- Смена каталога и чтение/запись вне проекта требуют подтверждения:
+  `cd /tmp` не выполняется молча.
 - Неизвестную команду оценивает модель вероятностью безопасности: выше
   порога — `allow`, ниже — `ask`.
 - Опасные и необратимые команды уходят человеку всегда, модель их не видит.
@@ -55,6 +57,7 @@
   "$schema": "https://opencode.ai/config.json",
   "permissions": [
     { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
     { "action": "shell", "resource": "git push --force*", "effect": "deny" },
     { "action": "shell", "resource": "git push -f*", "effect": "deny" },
     { "action": "shell", "resource": "git reset --hard*", "effect": "deny" },
@@ -139,11 +142,14 @@
 вызову. Полные списки правил, гардов и остаточные риски — в
 [docs/permissions.md](docs/permissions.md).
 
-Смену каталога (`cd`) плагин не проверяет: OpenCode разбирает её до
-permission-хука и передаёт дальше только остаток команды, поэтому
-`cd /tmp; cat notes.txt` выглядит как `cat notes.txt` в проекте. Остаточный
-риск — в
-[docs/permissions.md](docs/permissions.md#границы-allowlist-и-остаточный-риск).
+Смену каталога (`cd`) OpenCode проверяет отдельным действием
+`external_directory`, а не как shell-ресурс. Плагин его не видит, поэтому в
+конфиге есть своё правило `external_directory: * → ask`: без него `cd /tmp`
+выполняется молча. Чтение и запись вне проекта приходят либо тем же действием,
+либо в shell-ресурсе, где их ловит гард `outside-cwd`. `cd sandbox; ls`
+проходит, потому что цель внутри проекта. Цена правила — подтверждение на
+чтение и запись вне проекта; разбор и исключения — в
+[docs/permissions.md](docs/permissions.md#внешние-каталоги-и-cd).
 
 ## `/classifier`
 
@@ -183,5 +189,8 @@ system-сообщения в аудит не попадает никогда: т
 - [CHANGELOG.md](CHANGELOG.md): история изменений.
 - [ADR-0001](docs/adr/0001-shell-permission-classifier.md),
   [ADR-0002](docs/adr/0002-model-config-precedence.md),
-  [ADR-0003](docs/adr/0003-system-context-in-classifier.md): решения.
+  [ADR-0003](docs/adr/0003-system-context-in-classifier.md),
+  [ADR-0004](docs/adr/0004-decision-order.md),
+  [ADR-0005](docs/adr/0005-trusted-commands.md),
+  [ADR-0006](docs/adr/0006-external-directory-policy.md): решения.
 - Спека: [issue #1](https://github.com/Str1kez/opencode-allow-classifier/issues/1).

@@ -10,10 +10,10 @@
   закреплены в `Dockerfile`. Пакет `opencode-ai` из npm — это V1, не он.
 - Node 26 (совпадает с хостом), `git`, `ripgrep`, `jq`.
 - Профиль [`config/opencode.jsonc`](config/opencode.jsonc): тот же catch-all
-  `shell: * → ask` и те же deny-правила, что на хосте. Плагин подключён
-  локальным путём `/home/node/repo`, поэтому правки в `src/` подхватываются
-  без пересборки образа. `include_system_context` в профиле выключен, как и
-  в пользовательском конфиге.
+  `shell: * → ask`, `external_directory: * → ask` и те же deny-правила, что на
+  хосте. Плагин подключён локальным путём `/home/node/repo`, поэтому правки в
+  `src/` подхватываются без пересборки образа. `include_system_context` в
+  профиле выключен, как и в пользовательском конфиге.
 
 `--auto` здесь намеренно не используется: с ним хук вообще не вызывается
 для `allow`, и проверять классификатор становится не на чем. Headless-прогон
@@ -63,6 +63,10 @@ jq -c '{resources, verdict, source, rule}' \
   sandbox/.runtime/audit/evaluate-*.jsonl | tail -n 1
 ```
 
+Для `cd` и внешних путей записи в аудите плагина нет: это действие
+`external_directory`, его решает OpenCode до хука. Смотри строку
+`permission requested: external_directory (...)` в выводе прогона.
+
 Приёмочный чек-лист #21. Отмечай по факту прогона, а не по ожиданию.
 
 - [ ] `ls -la 2>/dev/null` проходит без подтверждения: `allow`/`allowlist`,
@@ -74,12 +78,16 @@ jq -c '{resources, verdict, source, rule}' \
 - [ ] `cat .env` остаётся `ask` с `rule: guard:secret-env`.
 - [ ] `git -C /tmp log` остаётся `ask` с `rule: guard:outside-cwd`: глобальный
       флаг не даёт читать вне проекта.
-- [ ] `cd /tmp` — известное ограничение, а не pass: OpenCode 2.2.4 вырезает
-      `cd` до permission-хука, команда выполняется без записи в аудит.
-      `cd /tmp; cat notes.txt` плагин видит как `cat notes.txt` с cwd проекта
-      и разрешает прочитать `/tmp/notes.txt`; `shell: cd *` и
-      `external_directory` в 2.2.4 не срабатывают. Это дыра харнесса, а не
-      allowlist; подробности — в `docs/permissions.md`.
+- [ ] `cd /tmp` остаётся `ask` и не выполняется: цель проверяет правило
+      `external_directory: * → ask`, плагин в этом действии не участвует.
+- [ ] `cd /tmp; cat notes.txt` остаётся `ask` и не читает `/tmp/notes.txt`:
+      запрос отклоняется на `cd`-цели до запуска shell.
+- [ ] `cd ..` остаётся `ask`: цель вне проекта.
+- [ ] `cd sandbox; ls` проходит: цель внутри проекта, `ls` разрешает
+      allowlist (`allow`/`allowlist`, `rule: ls`).
+- [ ] `cat ../notes.txt` остаётся `ask` с `rule: guard:outside-cwd`: shell-форму
+      ловит гард, а внешние пути, которые в shell-ресурсы не попадают, — правило
+      `external_directory`.
 - [ ] `node --version` получает `allow`/`allowlist`, `rule: trust`: префикс
       объявлен в `trusted_commands` профиля и встроенной таблице неизвестен.
 
@@ -100,19 +108,24 @@ jq -c '{resources, verdict, source, rule}' \
 Финальное состояние ветки `ticket-21`, образ `opencode-sandbox:2.2.4`,
 Node 26, 2026-11-01:
 
-| Команда | Вердикт | Источник | Правило |
-|---|---|---|---|
-| `ls -la 2>/dev/null` | `allow` | `allowlist` | `ls` |
-| `sed -n '1,20p' README.md` | `allow` | `allowlist` | `sed` |
-| `sudo -n true` | `ask` | `hard-ask` | `sudo` |
-| `cat .env` | `ask` | `guard` | `guard:secret-env` |
-| `git -C /tmp log` | `ask` | `guard` | `guard:outside-cwd` |
-| `cd /tmp` | — | — | выполнилась без запроса и без записи в аудит |
-| `node --version` | `allow` | `allowlist` | `trust` |
+| Команда | Результат |
+|---|---|
+| `ls -la 2>/dev/null` | `allow` / `allowlist` / `ls` |
+| `sed -n '1,20p' README.md` | `allow` / `allowlist` / `sed` |
+| `sudo -n true` | `ask` / `hard-ask` / `sudo` |
+| `cat .env` | `ask` / `guard` / `guard:secret-env` |
+| `git -C /tmp log` | `ask` / `guard` / `guard:outside-cwd` |
+| `cd /tmp` | `ask` / `external_directory` / `/tmp/*`, не выполнена |
+| `cd /tmp; cat notes.txt` | `ask` / `external_directory`, `/tmp/notes.txt` не прочитан |
+| `cd ..` | `ask` / `external_directory`, не выполнена |
+| `cd sandbox; ls` | `allow` / `allowlist` / `ls` |
+| `cat ../notes.txt` | `ask` / `guard` / `guard:outside-cwd` |
+| `node --version` | `allow` / `allowlist` / `trust` |
 
-`npm test` — 282 из 282, `npm run typecheck` — чисто, оба в контейнере.
-`cd` — единственный непройденный пункт: ограничение OpenCode 2.2.4, а не
-плагина; разбор — в пункте чек-листа и `docs/permissions.md`.
+`npm test` — 288 из 288, `npm run typecheck` — чисто, оба в контейнере.
+`cd`-цели и внешнее чтение проверяет OpenCode действием `external_directory`,
+поэтому в аудите плагина для них записи нет; это ожидаемо и описано в
+`docs/permissions.md`.
 
 System-смоук: включи `"include_system_context": true` в
 `sandbox/config/opencode.jsonc`, начни сессию, измени `AGENTS.md` и продолжи

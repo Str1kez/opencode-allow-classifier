@@ -125,7 +125,7 @@ function install(target: string): number {
   for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`);
   if (result.status === "created") {
     process.stdout.write(
-      `installed: catch-all ask, ${DENY_RULES.length} deny rules, plugin ${REPO_ROOT}\n`,
+      `installed: catch-all ask, external_directory ask, ${DENY_RULES.length} deny rules, plugin ${REPO_ROOT}\n`,
     );
   }
   return 0;

@@ -183,6 +183,27 @@ test("rollback restores a partially configured config byte for byte", (t) => {
   assert.equal(existsSync(manifestPath(config, directory)), false);
 });
 
+test("rollback removes the external_directory ask rule install added", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+  ],
+}
+`;
+  writeFileSync(config, original);
+
+  const installed = run(["install", "--config", config], { cwd: directory });
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.match(readFileSync(config, "utf8"), /"action": "external_directory", "resource": "\*", "effect": "ask"/);
+
+  const rolled = run(["rollback", "--config", config], { cwd: directory });
+
+  assert.equal(rolled.status, 0, rolled.stderr);
+  assert.equal(readFileSync(config, "utf8"), original);
+});
+
 test("rollback restores a plugin string that install replaced", (t) => {
   const directory = scratch(t);
   const config = join(directory, "opencode.jsonc");

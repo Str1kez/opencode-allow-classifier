@@ -5,6 +5,10 @@
   // run either executes (the plugin downgraded it) or shows up in the audit.
   "permissions": [
     { "action": "shell", "resource": "*", "effect": "ask" },
+    // `cd` targets and reads/edits outside the project arrive as external_directory, not as shell.
+    // OpenCode's default is allow, so this rule is what makes `cd /tmp` and `cd /tmp; cat notes.txt`
+    // ask before execution.
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
 
     // Deny rules stay after the catch-all. The hook is never called for them,
     // so the classifier cannot overturn a ban.
