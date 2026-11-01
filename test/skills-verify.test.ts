@@ -16,16 +16,23 @@ const DENY_RESOURCES = [
   "*--dangerously-skip-permissions*",
 ];
 
-function configWith(packageRoot: string, options: Record<string, unknown> = { enabled: true }): string {
+function configWith(
+  packageRoot: string,
+  options: Record<string, unknown> = { enabled: true },
+  includeExternalRule = true,
+): string {
   const deny = DENY_RESOURCES.map(
     (resource) => `    { "action": "shell", "resource": ${JSON.stringify(resource)}, "effect": "deny" }`,
   ).join(",\n");
+  const external = includeExternalRule
+    ? `    { "action": "external_directory", "resource": "*", "effect": "ask" },\n`
+    : "";
 
   return `{
   "$schema": "https://opencode.ai/config.json",
   "permissions": [
     { "action": "shell", "resource": "*", "effect": "ask" },
-${deny}
+${external}${deny}
   ],
   "plugins": [
     {
@@ -90,6 +97,17 @@ test("verify passes a clean config, the supported harness and the package depend
   assert.match(result.stdout, /PASS cat \.env -> ask \/ guard \/ guard:secret-env/);
   assert.match(result.stdout, /PASS cat \.\.\/secret\.txt -> ask \/ guard \/ guard:outside-cwd/);
   assert.match(result.stdout, /PASS ls -> allow \/ allowlist \/ ls/);
+});
+
+test("verify fails when the mandatory external_directory rule is missing", (t) => {
+  const directory = scratch(t);
+  const config = writeConfig(directory, configWith(REPO_ROOT, { enabled: true }, false));
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /FAIL policy: external_directory rule "\*" with effect "ask" is missing/);
+  assert.match(result.stdout, /verify: failed/);
 });
 
 test("verify warns but stays green on a harness outside 2.2.x", (t) => {

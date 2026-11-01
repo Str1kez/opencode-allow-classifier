@@ -47,7 +47,9 @@ export interface ManifestOriginal {
   readonly text: string;
 }
 
-export interface ManifestAdditions extends MergeAdditions {
+export interface ManifestAdditions extends Omit<MergeAdditions, "externalDirectory"> {
+  /** Older manifests predate this field; missing means the rule was not added by install. */
+  readonly externalDirectory?: boolean;
   /** The clean layout's `$schema` member was added. */
   readonly schema: boolean;
   readonly packageRoot: string;
@@ -187,6 +189,7 @@ function isAdditions(value: object): value is ManifestAdditions {
     typeof additions.permissionsArray === "boolean" &&
     typeof additions.pluginsArray === "boolean" &&
     typeof additions.catchAll === "boolean" &&
+    (additions.externalDirectory === undefined || typeof additions.externalDirectory === "boolean") &&
     Array.isArray(additions.denyRules) &&
     additions.denyRules.every((resource) => typeof resource === "string") &&
     (additions.plugin === "kept" ||

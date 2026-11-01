@@ -36,9 +36,9 @@ export interface InstallOptions {
  * Installs the classifier into a config file.
  *
  * A missing or empty file gets the clean layout. A configured file is merged: only the missing
- * catch-all, deny rules and plugin entry are added. Order violations and incompatible values stop
- * the install without touching the file. A successful change records what was added so `rollback`
- * can reverse exactly that later.
+ * catch-all, `external_directory` ask rule, deny rules and plugin entry are added. Order violations
+ * and incompatible values stop the install without touching the file. A successful change records
+ * what was added so `rollback` can reverse exactly that later.
  */
 export function installConfig(path: string, packageRoot: string, options: InstallOptions = {}): InstallResult {
   const configPath = resolve(path);
@@ -144,6 +144,7 @@ function create(
       permissionsArray: true,
       pluginsArray: true,
       catchAll: true,
+      externalDirectory: true,
       denyRules: DENY_RULES.map((rule) => rule.resource),
       plugin: "added",
       schema: true,
@@ -185,9 +186,10 @@ function describeAdditions(additions: MergeAdditions): string {
   const parts: string[] = [];
 
   if (additions.permissionsArray) {
-    parts.push(`permissions array with catch-all ask and ${additions.denyRules.length} deny rules`);
+    parts.push(`permissions array with catch-all ask, external_directory ask and ${additions.denyRules.length} deny rules`);
   } else {
     if (additions.catchAll) parts.push("catch-all ask");
+    if (additions.externalDirectory) parts.push("external_directory ask");
     if (additions.denyRules.length > 0) {
       parts.push(`${additions.denyRules.length} deny rule${additions.denyRules.length === 1 ? "" : "s"}`);
     }
