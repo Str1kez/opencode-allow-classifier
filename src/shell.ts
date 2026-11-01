@@ -169,15 +169,18 @@ function isDigit(character: string | undefined): boolean {
   return character !== undefined && character >= "0" && character <= "9";
 }
 
-/** A redirect target ends at whitespace; `/dev/null.log` is another file, not the null device. */
+/**
+ * Bash ends a word at space, tab or newline. The other `\s` characters (NBSP, `\r`, `\f`, U+2028)
+ * stay inside the argument, so `>/dev/null\r` names the file `/dev/null\r`, not the null device.
+ */
 function isTokenBoundary(character: string | undefined): boolean {
-  return character === undefined || /\s/.test(character);
+  return character === undefined || character === " " || character === "\t" || character === "\n";
 }
 
 /**
- * End offset of the stream redirect that starts at the `>` at `index`, or `undefined` when the
- * redirect writes a real file. Only the two harmless shapes qualify: duplicating a descriptor
- * (`2>&1`, `>&2`) and sending a stream to `/dev/null`.
+ * End offset of the stream redirect that starts at the `>` at `index`, or `undefined` when
+ * normalization cannot prove the redirect is harmless. Only two literal shapes qualify: duplicating
+ * a descriptor (`2>&1`, `>&2`) and sending a stream to a bare `/dev/null`.
  */
 function streamRedirectEnd(characters: ReadonlyArray<string>, index: number): number | undefined {
   let position = index + 1;
@@ -190,7 +193,7 @@ function streamRedirectEnd(characters: ReadonlyArray<string>, index: number): nu
     return isTokenBoundary(characters[position]) ? position : undefined;
   }
 
-  while (position < characters.length && /\s/.test(characters[position]!)) position += 1;
+  while (position < characters.length && isTokenBoundary(characters[position])) position += 1;
 
   const target = "/dev/null";
   if (characters.slice(position, position + target.length).join("") !== target) return undefined;
@@ -204,8 +207,10 @@ function streamRedirectEnd(characters: ReadonlyArray<string>, index: number): nu
  * `1>/dev/null` and `>/dev/null` create no file and must not cancel a read-only rule. A redirect to a
  * real file, including the append form `>>`, stays in the text.
  *
- * Quoted and escaped text is left alone, because the shell passes it as a literal argument. The
- * replacement has the same length, so the rest of the command keeps its positions.
+ * Quoted and escaped text is left alone, because the shell passes it as a literal argument. So is a
+ * quoted target (`2>"/dev/null"`) and a target followed by shell punctuation: the normalizer does not
+ * parse quoting, so the conservative ask stays. The replacement has the same length, so the rest of
+ * the command keeps its positions.
  */
 export function stripStreamRedirects(raw: string): string {
   const characters = [...raw];
@@ -231,8 +236,8 @@ export function stripStreamRedirects(raw: string): string {
       index += 1;
       continue;
     }
-    // `&>` redirects both streams at once and `>>` appends; neither is one of the harmless shapes.
-    // Leave them to the redirect guard instead of blanking half of the operator.
+    // `&>` (both streams at once) and `>>` (append) are not among the recognized shapes; leave the
+    // whole operator to the redirect guard instead of blanking half of it.
     if (character !== ">" || characters[index - 1] === "&" || characters[index - 1] === ">") continue;
 
     const end = streamRedirectEnd(characters, index);
@@ -242,7 +247,7 @@ export function stripStreamRedirects(raw: string): string {
     // redirect has no fd and `x2` is the argument.
     let start = index;
     while (start > 0 && isDigit(characters[start - 1])) start -= 1;
-    if (start > 0 && !/\s/.test(characters[start - 1]!)) start = index;
+    if (start > 0 && !isTokenBoundary(characters[start - 1])) start = index;
 
     for (let position = start; position < end; position += 1) characters[position] = " ";
     index = end - 1;

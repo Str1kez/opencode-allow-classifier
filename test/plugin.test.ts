@@ -358,6 +358,8 @@ test("guard cancels the allowlist for secrets and writes", async () => {
   const cases: ReadonlyArray<readonly [ReadonlyArray<string>, string]> = [
     [["cat .env"], "guard:secret-env"],
     [["cat .env.local"], "guard:secret-env"],
+    // Normalizing the stream redirect must not hide the secret from the text guards.
+    [["cat .env 2>/dev/null"], "guard:secret-env"],
     [["cat ~/.ssh/id_rsa"], "guard:secret-ssh"],
     [["cat credentials.json"], "guard:secret-credentials"],
     [["cat /etc/hosts"], "guard:system-etc"],
@@ -396,6 +398,9 @@ test("stream redirects do not cancel the allowlist", async () => {
     "echo hello >&2",
     "cat README.md 2> /dev/null",
     "cat README.md 22>/dev/null",
+    // Escaped and quoted redirect text is a literal argument, not a redirection.
+    "cat README.md 2\\>/dev/null",
+    "cat README.md '2>/dev/null'",
   ];
 
   try {
@@ -412,6 +417,26 @@ test("stream redirects do not cancel the allowlist", async () => {
   }
 });
 
+test("stream redirects do not defeat restricted allowlist rules", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["git branch -a 2>&1", "git-branch"],
+    ["git remote -v 2>&1", "git-remote-v"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+      assert.deepEqual(harness.auditEntries().at(-1)?.["resources"], [command]);
+    }
+    // Normalizing the redirect must not widen the rule past its allowed tokens.
+    assert.equal(await verdict(harness, ["git branch -D main 2>&1"]), "ask");
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("redirects to a file still cancel the allowlist", async () => {
   const harness = await start();
   const asked = [
@@ -420,11 +445,20 @@ test("redirects to a file still cancel the allowlist", async () => {
     "cat README.md >> out.txt",
     "cat README.md 2>>/dev/null",
     "cat README.md > out.txt 2>&1",
+    "ls 2> /tmp/err",
     // `&>` redirects both streams, but only a `/dev/null` target is recognised; keep the safe ask.
     "cat README.md &>/dev/null",
-    // Only the exact `/dev/null` target is a stream redirect: a longer name is a file.
+    // A quoted target is a file as far as this normalizer can prove; it does not parse quoting.
+    'cat README.md 2>"/dev/null"',
+    // Only the exact `/dev/null` target is a stream redirect: a longer name or a trailing
+    // non-separator character is a file.
     "cat README.md >/dev/nulll",
     "cat README.md 2>/dev/null.log",
+    "cat README.md >/dev/null\r",
+    "cat README.md >\u00a0/dev/null",
+    // A target followed by shell punctuation is left for the guard.
+    "cat README.md >/dev/null)",
+    "cat README.md >/dev/null;",
   ];
 
   try {
@@ -504,12 +538,18 @@ test("hard-ask sends privileged and irreversible commands to the human", async (
 test("rm inside cwd is not hard-ask, it falls through to the classifier", async () => {
   const harness = await start();
   try {
-    const input = evaluation({ resources: ["rm src/old.ts"] });
-    await harness.evaluate(input);
+    for (const command of ["rm src/old.ts", "rm -rf build > /dev/null"]) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
 
-    assert.equal(input.effect, "ask");
-    const entry = harness.auditEntries().at(-1);
-    assert.deepEqual({ source: entry?.["source"], rule: entry?.["rule"] }, { source: "model", rule: "classifier" });
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "model", rule: "classifier" },
+        command,
+      );
+    }
   } finally {
     harness.dispose();
   }
