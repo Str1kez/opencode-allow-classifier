@@ -554,6 +554,10 @@ test("printf cannot smuggle terminal control escapes past the allowlist", async 
     // OSC 52 writes the clipboard; the format carries an octal escape, not a literal ESC byte, so the
     // metacharacter guard (which keys on the raw byte) never sees it.
     ["printf '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    // Bash and zsh accept octal without a leading zero, and `\E`/`\U` as ESC spellings too.
+    ["printf '\\33]52;c;SGVsbG8='", "guard:printf-escape"],
+    ["printf '\\E[2J'", "guard:printf-escape"],
+    ["printf '\\U0000001b[2J'", "guard:printf-escape"],
     ["printf '\\x1b[2J'", "guard:printf-escape"],
     ["printf '\\u001b[31m'", "guard:printf-escape"],
     ["printf '\\e[2J'", "guard:printf-escape"],
@@ -561,6 +565,8 @@ test("printf cannot smuggle terminal control escapes past the allowlist", async 
     ["printf '\\0'", "guard:printf-escape"],
     // `%b` makes printf interpret escapes in the argument, so the format is not the only way in.
     ["printf '%b' '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    // `-v` may carry the variable name in the same token; the format is still the next argument.
+    ["printf -vx '%b' '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
   ];
 
   try {

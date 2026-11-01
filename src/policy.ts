@@ -284,10 +284,11 @@ function guardTexts(segment: Segment): ReadonlyArray<string> {
 }
 
 /**
- * Escapes printf turns into bytes: `\0` covers the octal form (`\033`), `\x` and `\u` the hex forms,
- * `\e` is ESC and `\a` is BEL. `%b` applies the same interpretation to an argument.
+ * Escapes printf turns into bytes: octal with or without a leading zero (`\033`, `\33`), hex (`\x`),
+ * unicode (`\u`, `\U`), ESC (`\e`, `\E`) and BEL (`\a`). `%b` applies the same interpretation to an
+ * argument.
  */
-const PRINTF_CONTROL_ESCAPE = /\\(?:0|x|u|e|a)/;
+const PRINTF_CONTROL_ESCAPE = /\\(?:[0-7]{1,3}|x|u|U|e|E|a)/;
 
 /** `grep -r`, `-R`, `-rn`, `-d` and their long forms. */
 const GREP_RECURSIVE_SHORT = /^-[^-]*[rRd]/;
@@ -589,10 +590,13 @@ function matchesGuard(rule: GuardRule, segment: Segment, cwd: string, realpath: 
     case "program-path":
       return !isTrustedProgramPath(segment.tokens[0] ?? "", TRUSTED_PROGRAM_DIRECTORIES);
     case "printf-escape": {
-      // The format is the one argument printf always interprets; options are `--` and bash's `-v name`.
+      // The format is the one argument printf always interprets. Options are `--` and bash's `-v`,
+      // which takes the variable name either as the next argument (`-v x`) or inside the token (`-vx`).
       let index = 1;
       if (segment.tokens[index] === "--") index += 1;
-      if (segment.tokens[index] === "-v") index += 2;
+      while (segment.tokens[index]?.startsWith("-v") && segment.tokens[index] !== "--") {
+        index += segment.tokens[index] === "-v" ? 2 : 1;
+      }
 
       const format = segment.tokens[index];
       if (format === undefined) return false;
