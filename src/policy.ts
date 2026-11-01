@@ -16,6 +16,7 @@ import {
   resolvesOutsideCwd,
   resolvesToCwd,
   shellActiveText,
+  stripStreamRedirects,
   tokenize,
   type RealPathResolver,
 } from "./shell.ts";
@@ -145,6 +146,18 @@ function skipGlobalFlags(program: string, args: ReadonlyArray<string>): Readonly
   }
 
   return args.slice(index);
+}
+
+function segmentOf(text: string): Segment {
+  return { text, expanded: text.replace(/["']/g, ""), tokens: tokenize(text) };
+}
+
+/**
+ * What every gate sees. Stream redirections write no file, so `2>&1` and `2>/dev/null` must not be
+ * read as writes. The audit keeps the resource as typed; only `decide` works on the normalized text.
+ */
+function normalizedSegment(text: string): Segment {
+  return segmentOf(stripStreamRedirects(text));
 }
 
 /** Operands of `rm`: flags dropped, `--` honoured, `-` (stdin) is not a path. */
@@ -402,8 +415,12 @@ function finish(decision: Omit<Decision, "latency">, started: number): Decision 
 }
 
 /**
- * Verdict for a whole evaluation. Hard-ask anywhere wins; otherwise every resource must pass the same
- * two gates — an allowlist entry and the secret/write guard — or the whole call asks.
+ * Verdict for a whole evaluation. Every resource is normalized before any gate: stream redirections
+ * are blanked (see `stripStreamRedirects`) because they write no file, so `2>&1` cannot turn a
+ * read-only command into an asked write. The audit keeps the resource as typed.
+ *
+ * Hard-ask anywhere wins; otherwise every resource must pass the same two gates — an allowlist entry
+ * and the secret/write guard — or the whole call asks.
  *
  * `realpath` is only used to see through symlinks; without it the path guards compare strings.
  */
@@ -413,11 +430,7 @@ export function decide(
   realpath?: RealPathResolver,
 ): Decision {
   const started = performance.now();
-  const segments: Segment[] = resources.map((text) => ({
-    text,
-    expanded: text.replace(/["']/g, ""),
-    tokens: tokenize(text),
-  }));
+  const segments: Segment[] = resources.map(normalizedSegment);
 
   if (segments.length === 0) {
     return finish({ verdict: "ask", source: "default", rule: "empty-resources", probability: null, model: null }, started);
