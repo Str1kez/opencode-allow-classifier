@@ -33,13 +33,14 @@ interface ParsedConfig {
 
 function permissionLines(): string {
   const rules = [
-    { effect: "ask", resource: CATCH_ALL },
-    ...DENY_RESOURCES.map((resource) => ({ effect: "deny", resource })),
+    { action: "shell", effect: "ask", resource: CATCH_ALL },
+    { action: "external_directory", effect: "ask", resource: CATCH_ALL },
+    ...DENY_RESOURCES.map((resource) => ({ action: "shell", effect: "deny", resource })),
   ];
   return rules
     .map(
       (rule) =>
-        `    { "action": "shell", "resource": ${JSON.stringify(rule.resource)}, "effect": ${JSON.stringify(rule.effect)} }`,
+        `    { "action": ${JSON.stringify(rule.action)}, "resource": ${JSON.stringify(rule.resource)}, "effect": ${JSON.stringify(rule.effect)} }`,
     )
     .join(",\n");
 }
@@ -142,7 +143,13 @@ test("install adds only missing deny rules to a partially configured config", (t
     readFileSync(manifestPathFor(config, { XDG_STATE_HOME: join(directory, "state") }), "utf8"),
   ) as {
     original: { exists: boolean; text: string };
-    additions: { catchAll: boolean; denyRules: string[]; plugin: string; pluginsArray: boolean };
+    additions: {
+      catchAll: boolean;
+      externalDirectory: boolean;
+      denyRules: string[];
+      plugin: string;
+      pluginsArray: boolean;
+    };
   };
   assert.equal(manifest.original.exists, true);
   assert.equal(manifest.original.text, original);
@@ -154,6 +161,7 @@ test("install adds only missing deny rules to a partially configured config", (t
     "*--dangerously-skip-permissions*",
   ]);
   assert.equal(manifest.additions.catchAll, false);
+  assert.equal(manifest.additions.externalDirectory, true);
   assert.equal(manifest.additions.pluginsArray, false);
   assert.equal(manifest.additions.plugin, "kept");
 
@@ -163,6 +171,118 @@ test("install adds only missing deny rules to a partially configured config", (t
   assert.equal(rerun.status, 0, rerun.stderr);
   assert.match(rerun.stdout, /no changes/);
   assert.equal(read(), afterFirstRun);
+});
+
+test("install adds the external_directory ask rule and keeps a foreign external rule", (t) => {
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "/reference/*", "effect": "allow" }, // foreign boundary
+    { "action": "shell", "resource": "rm -rf*", "effect": "deny" },
+  ],
+}
+`;
+  const { config, directory, read, result } = install(t, original);
+
+  assert.equal(result.status, 0, result.stderr);
+  const text = read();
+  assert.match(text, /\/\/ foreign boundary/);
+
+  const parsed = parse(text);
+  assert.deepEqual(parsed.permissions[0], { action: "shell", resource: "*", effect: "ask" });
+  assert.deepEqual(parsed.permissions[1], { action: "external_directory", resource: "*", effect: "ask" });
+  assert.ok(
+    parsed.permissions.some(
+      (rule) => rule.action === "external_directory" && rule.resource === "/reference/*" && rule.effect === "allow",
+    ),
+  );
+  assert.deepEqual(new Set(denyResources(parsed)), new Set(DENY_RESOURCES));
+
+  const manifest = JSON.parse(
+    readFileSync(manifestPathFor(config, { XDG_STATE_HOME: join(directory, "state") }), "utf8"),
+  ) as { additions: { externalDirectory: boolean } };
+  assert.equal(manifest.additions.externalDirectory, true);
+
+  const afterFirstRun = read();
+  const rerun = run(directory, ["install", "--config", config]);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /no changes/);
+  assert.equal(read(), afterFirstRun);
+});
+
+test("install inserts the external_directory ask rule before foreign external rules", (t) => {
+  const original = `{
+  "permissions": [
+    { "action": "external_directory", "resource": "/reference/*", "effect": "allow" },
+    { "action": "shell", "resource": "*", "effect": "ask" },
+  ],
+}
+`;
+  const { read, result } = install(t, original);
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = parse(read());
+  const external = parsed.permissions.filter((rule) => rule.action === "external_directory");
+  assert.deepEqual(external, [
+    { action: "external_directory", resource: "*", effect: "ask" },
+    { action: "external_directory", resource: "/reference/*", effect: "allow" },
+  ]);
+});
+
+test("install keeps a comment attached to the foreign external rule", (t) => {
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    // Reference data stays readable.
+    { "action": "external_directory", "resource": "/reference/*", "effect": "allow" },
+  ],
+}
+`;
+  const { read, result } = install(t, original);
+
+  assert.equal(result.status, 0, result.stderr);
+  const lines = read().split("\n");
+  const catchAllLine = lines.findIndex(
+    (line) => line.includes('"action": "external_directory"') && line.includes('"resource": "*"'),
+  );
+  const commentLine = lines.findIndex((line) => line.includes("// Reference data stays readable."));
+  const foreignLine = lines.findIndex((line) => line.includes('"resource": "/reference/*"'));
+
+  assert.ok(catchAllLine >= 0 && catchAllLine < commentLine, "catch-all is inserted before the comment");
+  assert.equal(commentLine + 1, foreignLine, "the comment stays directly above the foreign rule");
+});
+
+test("install refuses more than one external_directory catch-all rule", (t) => {
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
+  ],
+}
+`;
+  const { read, result } = install(t, original);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /multiple external_directory rules at indexes 1, 2/);
+  assert.match(result.stderr, /file left unchanged/);
+  assert.equal(read(), original);
+});
+
+test("install refuses a conflicting external_directory rule", (t) => {
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "allow" },
+  ],
+}
+`;
+  const { read, result } = install(t, original);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /required external_directory rule "\*" exists with effect "allow"/);
+  assert.match(result.stderr, /file left unchanged/);
+  assert.equal(read(), original);
 });
 
 test("install stops with a proposed diff when the catch-all is not the first shell rule", (t) => {
@@ -325,7 +445,7 @@ test("install adds a missing permissions array and appends the plugin entry", (t
   const parsed = parse(read());
 
   assert.equal(parsed.model, "provider/model");
-  assert.equal(parsed.permissions.length, 1 + DENY_RESOURCES.length);
+  assert.equal(parsed.permissions.length, 2 + DENY_RESOURCES.length);
   assert.equal(shellRules(parsed)[0]!.resource, CATCH_ALL);
   assert.deepEqual(new Set(denyResources(parsed)), new Set(DENY_RESOURCES));
   assert.deepEqual(parsed.plugins[0], { package: "other-plugin", options: { x: 1 } });
@@ -366,6 +486,7 @@ test("install inserts a missing catch-all before the first shell rule", (t) => {
     [
       ["edit", "docs/**", "deny"],
       ["shell", CATCH_ALL, "ask"],
+      ["external_directory", CATCH_ALL, "ask"],
       ["shell", "ls*", "allow"],
       ["shell", "rm -rf*", "deny"],
       ...DENY_RESOURCES.filter((resource) => resource !== "rm -rf*").map((resource) => [
@@ -389,7 +510,7 @@ test("install fills empty permissions and plugins arrays", (t) => {
   const text = read();
   const parsed = parse(text);
 
-  assert.equal(parsed.permissions.length, 1 + DENY_RESOURCES.length);
+  assert.equal(parsed.permissions.length, 2 + DENY_RESOURCES.length);
   assert.equal(shellRules(parsed)[0]!.resource, CATCH_ALL);
   assert.deepEqual(new Set(denyResources(parsed)), new Set(DENY_RESOURCES));
   assert.deepEqual(parsed.plugins, [{ package: REPO_ROOT, options: { enabled: true } }]);
@@ -404,7 +525,7 @@ test("install fills an empty object config with both arrays", (t) => {
   assert.equal(result.status, 0, result.stderr);
   const parsed = parse(read());
 
-  assert.equal(parsed.permissions.length, 1 + DENY_RESOURCES.length);
+  assert.equal(parsed.permissions.length, 2 + DENY_RESOURCES.length);
   assert.equal(shellRules(parsed)[0]!.resource, CATCH_ALL);
   assert.deepEqual(parsed.plugins, [{ package: REPO_ROOT, options: { enabled: true } }]);
 });

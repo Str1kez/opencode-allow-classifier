@@ -143,7 +143,9 @@ export function leverOf(cluster: ClusterReport): Lever {
   const sources = cluster.sources;
   if (count(sources, "error") > 0 || hasUnknownSource(sources)) return "classifier-errors";
   if (count(sources, "hard-ask") > 0) return "hard-ask";
-  if (count(sources, "allowlist") > 0 || count(sources, "default") > 0) return "allowlist-and-guards";
+  if (count(sources, "guard") > 0 || count(sources, "allowlist") > 0 || count(sources, "default") > 0) {
+    return "allowlist-and-guards";
+  }
   if (count(sources, "model") > 0 || count(sources, "cache") > 0) return "model-and-threshold";
   return "classifier-errors";
 }
@@ -363,9 +365,13 @@ function noteFor(cluster: ClusterReport, lever: Lever, threshold: number): strin
       }
       if (guards.length > 0) {
         const falsePositive = guards.every((guard) => FALSE_POSITIVE_GUARDS.has(guard));
-        return falsePositive
-          ? `гард ${guards.join(",")} похож на ложное срабатывание: рекомендация ниже`
-          : `гард ${guards.join(",")}: оставить, прав разрешения не менять`;
+        // A new `guard` record proves the guard fired, not that the command is read-only: the guard
+        // runs before the allowlist now. Only an explicit allowlist hit is evidence for a widening.
+        if (falsePositive && count(cluster.sources, "allowlist") > 0) {
+          return `гард ${guards.join(",")} похож на ложное срабатывание: рекомендация ниже`;
+        }
+        if (falsePositive) return `гард ${guards.join(",")}: оставить — read-only форма не подтверждена`;
+        return `гард ${guards.join(",")}: оставить, прав разрешения не менять`;
       }
       if (count(cluster.sources, "default") > 0 && isReadOnlyShape(cluster.example)) {
         return "read-only форма без правила allowlist: рекомендация ниже";

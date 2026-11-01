@@ -259,7 +259,14 @@ function planPermissions(
   problems: string[],
 ): void {
   const additions = manifest.additions;
-  if (!additions.permissionsArray && !additions.catchAll && additions.denyRules.length === 0) return;
+  if (
+    !additions.permissionsArray &&
+    !additions.catchAll &&
+    additions.externalDirectory !== true &&
+    additions.denyRules.length === 0
+  ) {
+    return;
+  }
 
   const array = findArray(root, "permissions", problems);
   if (array === undefined) return;
@@ -273,6 +280,19 @@ function planPermissions(
         matches.length === 0
           ? "the catch-all ask rule added by install is missing or changed"
           : "more than one catch-all ask rule is present; cannot tell which one install added",
+      );
+    } else {
+      removed.add(matches[0]!);
+    }
+  }
+
+  if (additions.externalDirectory === true) {
+    const matches = matchingIndexes(array, (node) => isRule(node, "external_directory", "*", "ask"));
+    if (matches.length !== 1) {
+      problems.push(
+        matches.length === 0
+          ? "the external_directory ask rule added by install is missing or changed"
+          : "more than one external_directory ask rule is present; cannot tell which one install added",
       );
     } else {
       removed.add(matches[0]!);

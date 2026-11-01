@@ -1,4 +1,4 @@
-import { isThreshold, isTimeoutMs, normalizeModel } from "./settings.ts";
+import { isThreshold, isTimeoutMs, normalizeModel, parseTrustedCommands, type TrustedCommand } from "./settings.ts";
 
 /** Options the plugin reads from `ctx.options`, i.e. the `options` object in `opencode.jsonc`. */
 export interface ClassifierOptions {
@@ -17,6 +17,11 @@ export interface ClassifierOptions {
    * leaves the machine with the model call.
    */
   readonly includeSystemContext: boolean;
+  /**
+   * Per-project prefixes the user declares safe, e.g. `npm test`. Already tokenized and validated, so
+   * a broken entry never reaches the decision: it is dropped, and the stock allowlist stands.
+   */
+  readonly trustedCommands: ReadonlyArray<TrustedCommand>;
 }
 
 function directory(value: unknown): string | undefined {
@@ -35,5 +40,6 @@ export function readOptions(raw: Readonly<Record<string, unknown>>): ClassifierO
     threshold: isThreshold(raw["threshold"]) ? raw["threshold"] : undefined,
     timeoutMs: isTimeoutMs(raw["timeout_ms"]) ? raw["timeout_ms"] : undefined,
     includeSystemContext: raw["include_system_context"] === true,
+    trustedCommands: parseTrustedCommands(raw["trusted_commands"]),
   };
 }

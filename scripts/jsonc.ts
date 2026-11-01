@@ -417,11 +417,14 @@ export function insertArrayItems(
 
   const target = array.items[index];
   if (target !== undefined) {
-    const multiline = document.text.slice(array.start, target.start).includes("\n");
-    if (!multiline) return { start: target.start, end: target.start, text: `${itemTexts.join(", ")}, ` };
+    // Insert before the item's leading comments, not between the comment and the item: a comment
+    // attached to a rule must stay attached after the insertion.
+    const start = leadingCommentStart(document.text, target.start);
+    const multiline = document.text.slice(array.start, start).includes("\n");
+    if (!multiline) return { start, end: start, text: `${itemTexts.join(", ")}, ` };
 
-    const indent = lineIndent(document.text, target.start);
-    return { start: target.start, end: target.start, text: `${itemTexts.join(`,\n${indent}`)},\n${indent}` };
+    const indent = lineIndent(document.text, start);
+    return { start, end: start, text: `${itemTexts.join(`,\n${indent}`)},\n${indent}` };
   }
 
   const multiline =
@@ -561,6 +564,41 @@ function insertIntoContainer(
   }
 
   return { start: last.end, end: last.end, text: `,\n${elementIndent}${elementText}` };
+}
+
+/**
+ * Start of the comment block directly above `offset`, or `offset` when the line holds code or no
+ * comment precedes it. Only whitespace may separate the comment from the item; a blank line ends the
+ * block, so a section header does not travel with the next rule.
+ */
+function leadingCommentStart(text: string, offset: number): number {
+  let lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+  if (text.slice(lineStart, offset).trim() !== "") return offset;
+
+  let start = offset;
+  let inBlock = false;
+  for (;;) {
+    if (lineStart === 0) return start;
+    const previousEnd = lineStart - 1;
+    const previousStart = text.lastIndexOf("\n", previousEnd - 1) + 1;
+    const previousLine = text.slice(previousStart, previousEnd);
+    const line = previousLine.trim();
+    if (line.length === 0) return start;
+
+    const isComment =
+      inBlock || line.startsWith("//") || line.startsWith("/*") || line.endsWith("*/");
+    if (!isComment) return start;
+
+    start = previousStart + /^[ \t]*/.exec(previousLine)![0].length;
+    lineStart = previousStart;
+
+    if (inBlock) {
+      if (line.startsWith("/*")) inBlock = false;
+      continue;
+    }
+    if (line.startsWith("//")) continue;
+    if (line.endsWith("*/") && !line.startsWith("/*")) inBlock = true;
+  }
 }
 
 export function lineIndent(text: string, offset: number): string {

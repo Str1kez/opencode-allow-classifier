@@ -78,11 +78,52 @@
   `--include-sandbox`.
 - Раздел README о скиллах: назначение, команды и границы. В `GLOSSARY.md`
   добавлены «сигнатура команды» и «ask-кластер».
+- Read-only формы получают детерминированный `allow` через allowlist:
+  `sed -n 'Np'`/`'N,Mp'`, `gh` с `issue`/`pr`/`repo`/`run`/`release`/
+  `workflow` и `view`/`list`, `gh --version`, `git worktree list`,
+  `git remote get-url`, `git merge-base`, `git ls-files`, `git rev-list`,
+  `git for-each-ref`, `git config --get`, `git describe`, `git shortlog`,
+  а также `cut`, `tr`, `nl`, `strings`, `printf`, `true`, `sleep` и `sort`.
+  Глобальные флаги git (`-C`, `--no-pager`) больше не мешают allowlist,
+  но путь из `-C` вне cwd спрашивает. Новые гарды: `sort -o`/`--output`,
+  `sort --compress-program`, `git -c`/`--config-env`/`--exec-path=`
+  (`git-command-override`) и `git --paginate` (`git-pager-override`).
+  `cd` в allowlist не входит; неизвестные формы `sed` уходят
+  к классификатору, а не запрещаются.
+- Опция `trusted_commands`: массив префиксов, которые в проекте не спрашивают
+  (`npm test`, `npm run typecheck`, `node --test`). Сравнение по точным
+  токенам, минимум два токена, без shell-синтаксиса; невалидная запись
+  отбрасывается молча, принимается не больше 50. Совпадение даёт `allow` с
+  `source: allowlist` и `rule: trust`. Hard-ask и гарды выигрывают: запись
+  `["sudo ls"]` не разрешает `sudo`, а `["cat .env"]` остаётся `ask` с
+  `guard:secret-env`. Решение — в
+  [ADR-0005](docs/adr/0005-trusted-commands.md).
+- Правило `external_directory: * → ask` в чистой раскладке установщика,
+  `sandbox/config/opencode.jsonc`, README и `docs/permissions.md`: OpenCode
+  проверяет им смену каталога и чтение/запись вне проекта, которые не приходят
+  в плагин как shell-ресурсы. `install` добавляет правило в существующий
+  конфиг, `inspect` предупреждает о пропуске, другом эффекте или мёртвом
+  исключении, `rollback` удаляет добавленное. Решение и цена — в
+  [ADR-0006](docs/adr/0006-external-directory-policy.md).
 
 ### Изменено
 
+- Порядок решения — hard-ask → гард → allowlist → `ask` по умолчанию, каждый
+  шаг проходит по всем сегментам. Гард больше не зависит от того, знакома ли
+  allowlist программа: `python3 -c 'print(1)' ; cat ~/.ssh/id_rsa` и обратный
+  порядок дают одинаковый `ask` с `rule: guard:secret-ssh`, а `cmd 2> err.log`
+  спрашивает с `guard:redirect`. Сработавший гард модель не вызывает. В
+  аудите такие решения получают `source: guard`; старые записи с
+  `source: allowlist` и `rule: guard:*` читаются по-прежнему, а отчёт относит
+  `guard` к рычагу `allowlist-and-guards`. Решение — в
+  [ADR-0004](docs/adr/0004-decision-order.md).
+- Редиректы в поток (`2>&1`, `>&2`, `2>/dev/null`, `1>/dev/null`,
+  `>/dev/null`) больше не отменяют allowlist: read-only команда с таким
+  хвостом получает `allow`. Запись в файл (`> out.txt`, `2> err.log`, `>>`)
+  по-прежнему `ask` с `rule: guard:redirect`. Аудит хранит команду как
+  набрана.
 - Безопасные shell-команды больше не спрашивают подтверждения: плагин
-  понижает `ask` до `allow` после hard-ask, allowlist с гардами, кэша и
+  понижает `ask` до `allow` после hard-ask → гарда → allowlist → кэша и
   классификатора. Опасные и необратимые команды остаются человеку, `deny`
   не пересматривается.
 - README переписан под пользователя: установка описана как вызов скилла
@@ -99,6 +140,9 @@
 
 ### Исправлено
 
+- Закрыт обход `guard:outside-cwd` через `cd`: `cd /tmp; cat notes.txt`
+  останавливается правилом `external_directory: * → ask` до чтения
+  `/tmp/notes.txt`, а не разрешается как `cat notes.txt` внутри проекта.
 - Гард ловит метасимволы и подстановки внутри одного ресурса: `;`, перевод
   строки, `&`, глобы, `$'…'`, скобки и обратный слэш больше не проходят как
   `cat`.
@@ -120,6 +164,13 @@
   `.git/`, `*.p12`, `*.key`.
 - Управляющие байты в выводе больше не проходят: `git log --format=%x1b`
   и литеральный ESC уходят в `ask`.
+- `printf` с escape-форматом больше не получает `allow`: восьмеричные
+  `\033` и `\33`, hex `\x1b`, unicode `\u001b`/`\U0000001b`, `\e`/`\E`,
+  `\a` и `%b` (включая `printf -vx '%b' …`) дают `guard:printf-escape`.
+- Значения флагов, которые не являются путями, больше не считаются чтением
+  вне cwd: `cut -d/`, `tr -d /`, `nl -s /`, `sort -t/ -k1` теперь `allow`,
+  раньше спрашивали с `guard:outside-cwd`. `sort -T`/`--temporary-directory`
+  и `git -C` по-прежнему проверяются как пути.
 - Закрыты `date -s`, `tail -f`, `/dev/urandom` и `cat -`; хвостовой перевод
   строки от сканера больше не вызывает ложный `ask`.
 - `git --ext-diff` и `--textconv` больше не считаются read-only.

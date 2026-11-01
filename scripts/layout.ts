@@ -1,17 +1,31 @@
 /**
  * The clean config a fresh install produces.
  *
- * Rules are matched in order and the last match wins: the catch-all `ask` must come first and the
- * deny rules after it, otherwise a deny is overridden by the ask and reaches the classifier.
+ * Rules are matched in order and the last match wins: the shell catch-all `ask` must come first
+ * among shell rules and the deny rules after it, otherwise a deny is overridden by the ask and
+ * reaches the classifier. `external_directory * → ask` is a separate action: it covers `cd` targets
+ * and reads/edits outside the project, which never reach the plugin as shell resources.
  */
 
 export interface PermissionRule {
-  readonly action: "shell";
+  readonly action: "shell" | "external_directory";
   readonly resource: string;
   readonly effect: "ask" | "deny";
 }
 
 export const CATCH_ALL_RULE: PermissionRule = { action: "shell", resource: "*", effect: "ask" };
+
+/**
+ * `cd` and any read/edit outside the project arrive as `external_directory`, not as `shell`
+ * resources, so the shell catch-all never sees them. OpenCode's default is `allow`; asking here
+ * restores V1 behaviour and is what makes `cd /tmp` and reads/edits outside the project stop
+ * before execution. The trade-off is that every such read/edit prompts too.
+ */
+export const EXTERNAL_DIRECTORY_RULE: PermissionRule = {
+  action: "external_directory",
+  resource: "*",
+  effect: "ask",
+};
 
 export const DENY_RULES: readonly PermissionRule[] = [
   { action: "shell", resource: "git push --force*", effect: "deny" },
@@ -51,14 +65,14 @@ export interface ClassifierConfigValue {
 export function cleanConfigValue(packageRoot: string): ClassifierConfigValue {
   return {
     $schema: "https://opencode.ai/config.json",
-    permissions: [CATCH_ALL_RULE, ...DENY_RULES].map((rule) => ({ ...rule })),
+    permissions: [CATCH_ALL_RULE, EXTERNAL_DIRECTORY_RULE, ...DENY_RULES].map((rule) => ({ ...rule })),
     plugins: [{ package: packageRoot, options: { ...PLUGIN_OPTIONS } }],
   };
 }
 
 /** Two-space indentation, one rule per line and a trailing newline. */
 export function cleanConfigText(packageRoot: string): string {
-  const rules = [CATCH_ALL_RULE, ...DENY_RULES]
+  const rules = [CATCH_ALL_RULE, EXTERNAL_DIRECTORY_RULE, ...DENY_RULES]
     .map(
       (rule) =>
         `    { "action": ${quote(rule.action)}, "resource": ${quote(rule.resource)}, "effect": ${quote(rule.effect)} }`,

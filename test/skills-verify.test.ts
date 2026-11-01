@@ -16,16 +16,23 @@ const DENY_RESOURCES = [
   "*--dangerously-skip-permissions*",
 ];
 
-function configWith(packageRoot: string, options: Record<string, unknown> = { enabled: true }): string {
+function configWith(
+  packageRoot: string,
+  options: Record<string, unknown> = { enabled: true },
+  includeExternalRule = true,
+): string {
   const deny = DENY_RESOURCES.map(
     (resource) => `    { "action": "shell", "resource": ${JSON.stringify(resource)}, "effect": "deny" }`,
   ).join(",\n");
+  const external = includeExternalRule
+    ? `    { "action": "external_directory", "resource": "*", "effect": "ask" },\n`
+    : "";
 
   return `{
   "$schema": "https://opencode.ai/config.json",
   "permissions": [
     { "action": "shell", "resource": "*", "effect": "ask" },
-${deny}
+${external}${deny}
   ],
   "plugins": [
     {
@@ -87,9 +94,86 @@ test("verify passes a clean config, the supported harness and the package depend
   assert.doesNotMatch(result.stdout, /FAIL/);
 
   assert.match(result.stdout, /PASS sudo -n true -> ask \/ hard-ask \/ sudo/);
-  assert.match(result.stdout, /PASS cat \.env -> ask \/ allowlist \/ guard:secret-env/);
-  assert.match(result.stdout, /PASS cat \.\.\/secret\.txt -> ask \/ allowlist \/ guard:outside-cwd/);
+  assert.match(result.stdout, /PASS cat \.env -> ask \/ guard \/ guard:secret-env/);
+  assert.match(result.stdout, /PASS cat \.\.\/secret\.txt -> ask \/ guard \/ guard:outside-cwd/);
+  assert.match(result.stdout, /PASS sed -n '1,120p' README\.md -> allow \/ allowlist \/ sed/);
+  assert.match(result.stdout, /PASS sort -o out\.txt -> ask \/ guard \/ guard:sort-output/);
+  assert.match(result.stdout, /PASS git -C \/tmp log -> ask \/ guard \/ guard:outside-cwd/);
   assert.match(result.stdout, /PASS ls -> allow \/ allowlist \/ ls/);
+});
+
+test("verify dry-runs a declared trusted command", (t) => {
+  const directory = scratch(t);
+  const config = writeConfig(directory, configWith(REPO_ROOT, { enabled: true, trusted_commands: ["npm test"] }));
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PASS npm test -> allow \/ allowlist \/ trust/);
+  assert.match(result.stdout, /verify: ok/);
+});
+
+test("verify skips trusted prefixes that hard-ask before a usable one", (t) => {
+  const directory = scratch(t);
+  const config = writeConfig(
+    directory,
+    configWith(REPO_ROOT, { enabled: true, trusted_commands: ["sudo ls", "npm test"] }),
+  );
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PASS npm test -> allow \/ allowlist \/ trust/);
+  assert.doesNotMatch(result.stdout, /FAIL/);
+  assert.match(result.stdout, /verify: ok/);
+});
+
+test("verify skips the trusted dry run when every prefix is overridden", (t) => {
+  const directory = scratch(t);
+  const config = writeConfig(directory, configWith(REPO_ROOT, { enabled: true, trusted_commands: ["sudo ls"] }));
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /SKIP sudo ls -> ask \/ hard-ask \/ sudo/);
+  assert.doesNotMatch(result.stdout, /FAIL/);
+  assert.match(result.stdout, /verify: ok/);
+});
+
+test("verify warns but stays green when external_directory is stricter than asked", (t) => {
+  const directory = scratch(t);
+  const deny = DENY_RESOURCES.map(
+    (resource) => `    { "action": "shell", "resource": ${JSON.stringify(resource)}, "effect": "deny" }`,
+  ).join(",\n");
+  const config = writeConfig(
+    directory,
+    `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "deny" },
+${deny}
+  ],
+  "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "enabled": true } }]
+}
+`,
+  );
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /WARN policy: external_directory rule "\*" has effect "deny"/);
+  assert.match(result.stdout, /verify: ok/);
+});
+
+test("verify fails when the mandatory external_directory rule is missing", (t) => {
+  const directory = scratch(t);
+  const config = writeConfig(directory, configWith(REPO_ROOT, { enabled: true }, false));
+
+  const result = run(["verify", "--config", config, ...HARNESS, "--deps-root", REPO_ROOT], { cwd: directory });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /FAIL policy: external_directory rule "\*" with effect "ask" is missing/);
+  assert.match(result.stdout, /verify: failed/);
 });
 
 test("verify warns but stays green on a harness outside 2.2.x", (t) => {

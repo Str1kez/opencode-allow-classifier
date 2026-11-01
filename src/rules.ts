@@ -34,6 +34,12 @@ export interface AllowlistRule {
   readonly exact?: boolean;
   /** When set, every token past the prefix must be one of these. Blocks `git branch -D main`. */
   readonly allowedTokens?: readonly string[];
+  /**
+   * The first token past the prefix is a program script, not a path, and must match this pattern.
+   * Every later token is a file operand: a flag there (`-i`, `-e`) changes what the program does and
+   * rejects the rule. Used by `sed`, where only the bare print range is read-only.
+   */
+  readonly script?: RegExp;
 }
 
 export const HARD_ASK_RULES: readonly HardAskRule[] = [
@@ -78,6 +84,16 @@ export const ALLOWLIST_RULES: readonly AllowlistRule[] = [
   { name: "head", prefix: ["head"] },
   { name: "tail", prefix: ["tail"] },
   { name: "wc", prefix: ["wc"] },
+  // Pipeline filters and pauses: they read stdin or argv and write only to stdout.
+  { name: "cut", prefix: ["cut"] },
+  { name: "tr", prefix: ["tr"] },
+  { name: "nl", prefix: ["nl"] },
+  { name: "strings", prefix: ["strings"] },
+  { name: "printf", prefix: ["printf"] },
+  { name: "true", prefix: ["true"] },
+  { name: "sleep", prefix: ["sleep"] },
+  // `sort -o`/`--output` writes a file; the `sort-output` guard cancels this rule.
+  { name: "sort", prefix: ["sort"] },
   { name: "file", prefix: ["file"] },
   { name: "stat", prefix: ["stat"] },
   { name: "du", prefix: ["du"] },
@@ -87,11 +103,30 @@ export const ALLOWLIST_RULES: readonly AllowlistRule[] = [
   { name: "date", prefix: ["date"] },
   { name: "whoami", prefix: ["whoami"] },
   { name: "uname", prefix: ["uname"] },
+  // `gh` reads through the API. Only the read verbs of the command groups below are allowed: `api`,
+  // `auth`, `issue close`, `pr merge` and the rest reach the classifier.
+  { name: "gh-issue-view", prefix: ["gh", "issue", "view"] },
+  { name: "gh-issue-list", prefix: ["gh", "issue", "list"] },
+  { name: "gh-pr-view", prefix: ["gh", "pr", "view"] },
+  { name: "gh-pr-list", prefix: ["gh", "pr", "list"] },
+  { name: "gh-repo-view", prefix: ["gh", "repo", "view"] },
+  { name: "gh-repo-list", prefix: ["gh", "repo", "list"] },
+  { name: "gh-run-view", prefix: ["gh", "run", "view"] },
+  { name: "gh-run-list", prefix: ["gh", "run", "list"] },
+  { name: "gh-release-view", prefix: ["gh", "release", "view"] },
+  { name: "gh-release-list", prefix: ["gh", "release", "list"] },
+  { name: "gh-workflow-view", prefix: ["gh", "workflow", "view"] },
+  { name: "gh-workflow-list", prefix: ["gh", "workflow", "list"] },
+  { name: "gh-version", prefix: ["gh", "--version"], exact: true },
   { name: "rg", prefix: ["rg"] },
   { name: "grep", prefix: ["grep"] },
   // `find` itself only walks; the guard below validates the program it spawns after `-exec`.
   { name: "find", prefix: ["find"] },
   { name: "jq", prefix: ["jq"] },
+  // `sed -n 'N,Mp'` prints a line range and writes nothing. `-i`, `-e`, `w` and `s///` fall through
+  // to the classifier instead of being denied: an unknown form is a reason to ask the model, not a
+  // reason to block.
+  { name: "sed", prefix: ["sed", "-n"], script: /^\d+(,\d+)?p$/ },
   { name: "git-status", prefix: ["git", "status"] },
   { name: "git-diff", prefix: ["git", "diff"] },
   { name: "git-log", prefix: ["git", "log"] },
@@ -106,6 +141,17 @@ export const ALLOWLIST_RULES: readonly AllowlistRule[] = [
   { name: "git-rev-parse", prefix: ["git", "rev-parse"] },
   { name: "git-blame", prefix: ["git", "blame"] },
   { name: "git-stash-list", prefix: ["git", "stash", "list"] },
+  // Read-only plumbing. `git config --get` is the read form; `git config key value` writes and stays
+  // out. The whole of `merge-base`, `rev-list` and `for-each-ref` only walks the object graph.
+  { name: "git-worktree-list", prefix: ["git", "worktree", "list"] },
+  { name: "git-remote-get-url", prefix: ["git", "remote", "get-url"] },
+  { name: "git-merge-base", prefix: ["git", "merge-base"] },
+  { name: "git-ls-files", prefix: ["git", "ls-files"] },
+  { name: "git-rev-list", prefix: ["git", "rev-list"] },
+  { name: "git-for-each-ref", prefix: ["git", "for-each-ref"] },
+  { name: "git-config-get", prefix: ["git", "config", "--get"] },
+  { name: "git-describe", prefix: ["git", "describe"] },
+  { name: "git-shortlog", prefix: ["git", "shortlog"] },
 ];
 
 /**
@@ -130,6 +176,18 @@ export type GuardRule =
   | { readonly name: string; readonly kind: "cwd-root-search"; readonly program?: string }
   /** `find -exec PROG`: every spawned program must be read-only and resolved through a trusted path. */
   | { readonly name: string; readonly kind: "find-exec"; readonly program?: string }
+  /**
+   * `printf` turns escapes in its format into bytes before anything reaches the terminal. `\0` (octal),
+   * `\x`, `\u`, `\e` and `\a` can build OSC/CSI sequences that the literal-ESC check never sees, and
+   * `%b` applies the same interpretation to an argument.
+   */
+  | { readonly name: string; readonly kind: "printf-escape"; readonly program?: string }
+  /**
+   * A global flag that changes which program git runs: `-c`/`--config-env` values such as `core.pager`,
+   * `diff.external` or `alias.*` name a program, and `--exec-path=` points the subcommand lookup at a
+   * directory. Such a segment is not read-only.
+   */
+  | { readonly name: string; readonly kind: "git-command-override"; readonly program?: string }
   /** Matched against text the shell would still act on: quoted literals do not count. */
   | { readonly name: string; readonly kind: "active-substring"; readonly value: string };
 
@@ -194,10 +252,19 @@ export const GUARD_RULES: readonly GuardRule[] = [
   { name: "stdin-read", kind: "token", values: ["-"] },
   // `jq -n env` and `jq -n 'env.HOME'` print the whole environment without touching a file.
   { name: "jq-environment", kind: "substring", value: "env", program: "jq" },
+  // `printf '\033]52;c;…'` builds an OSC 52 clipboard write from text, so no literal ESC byte appears
+  // in the resource and the metacharacter guard below never fires.
+  { name: "printf-escape", kind: "printf-escape", program: "printf" },
 
   // Any write: `>` also covers `>>`, `2>` and `&>`.
   { name: "redirect", kind: "active-substring", value: ">" },
   { name: "tee", kind: "token", values: ["tee"] },
+  // `sort -o FILE` and `sort --output=FILE` write. `-ro out` carries the same flag inside a cluster.
+  { name: "sort-output", kind: "short-cluster", values: ["o"], program: "sort" },
+  { name: "sort-output", kind: "long-flag", value: "--output", program: "sort" },
+  // `sort --compress-program=PROG` runs PROG on temporary files; the long-flag prefix match also
+  // catches the abbreviated `--compress-p` that GNU getopt accepts.
+  { name: "sort-compress-program", kind: "long-flag", value: "--compress-program", program: "sort" },
   // `-o` is an output flag only for git. For `find` it is the OR operator, for `grep`/`rg` it means
   // "only matching"; no allowlisted program writes through it.
   { name: "output-short-flag", kind: "short-flag", value: "-o", program: "git" },
@@ -211,6 +278,10 @@ export const GUARD_RULES: readonly GuardRule[] = [
   { name: "git-external-command", kind: "long-flag", value: "--ext-diff" },
   { name: "git-external-command", kind: "long-flag", value: "--textconv" },
   { name: "git-external-command", kind: "long-flag", value: "--show-signature" },
+  // `-c` itself is skipped with the other global flags; the config it carries is what gets checked.
+  { name: "git-command-override", kind: "git-command-override", program: "git" },
+  // `--paginate` forces a pager even without a tty, and `core.pager`/`pager.*` name a program.
+  { name: "git-pager-override", kind: "long-flag", value: "--paginate", program: "git" },
 
   // Flags that read a file the positional guard never sees.
   // `-f` is absent for `grep`/`rg`: it only loads patterns. `jq -f` runs a jq program that can print
@@ -261,7 +332,9 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // braces, backslashes, history expansion, globs and bracket expressions. Checked on the raw resource
   // before tokenization, because tokenizing glues `;` to the preceding word. Deliberately noisy:
   // `rg "a|b"` asks. A false ask costs one keypress, a false allow costs a shell.
-  // `%x` is git's hex-escape form and can emit an ESC byte; the literal ESC covers printf and echo.
+  // `%x` is git's hex-escape form; git expands it into an ESC byte, so the raw resource carries no
+  // literal ESC. A literal ESC byte is covered by the last value; printf escapes are handled by the
+  // `printf-escape` guard above because `\033` and friends are plain text until printf interprets them.
   {
     name: "shell-metacharacter",
     kind: "metacharacter",

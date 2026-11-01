@@ -10,10 +10,10 @@
   закреплены в `Dockerfile`. Пакет `opencode-ai` из npm — это V1, не он.
 - Node 26 (совпадает с хостом), `git`, `ripgrep`, `jq`.
 - Профиль [`config/opencode.jsonc`](config/opencode.jsonc): тот же catch-all
-  `shell: * → ask` и те же deny-правила, что на хосте. Плагин подключён
-  локальным путём `/home/node/repo`, поэтому правки в `src/` подхватываются
-  без пересборки образа. `include_system_context` в профиле выключен, как и
-  в пользовательском конфиге.
+  `shell: * → ask`, `external_directory: * → ask` и те же deny-правила, что на
+  хосте. Плагин подключён локальным путём `/home/node/repo`, поэтому правки в
+  `src/` подхватываются без пересборки образа. `include_system_context` в
+  профиле выключен, как и в пользовательском конфиге.
 
 `--auto` здесь намеренно не используется: с ним хук вообще не вызывается
 для `allow`, и проверять классификатор становится не на чем. Headless-прогон
@@ -45,27 +45,58 @@ docker compose -f sandbox/compose.yaml run --rm -T agent npm run typecheck
 
 ## Смоук
 
-Headless-прогон без интерактива; решения видны в аудите.
+Headless-прогон без интерактива: `ask` автоматически отклоняется, `allow`
+исполняется. Каждая строка чек-листа — отдельный запуск: подставь команду в
+пример ниже, иначе модель может сделать лишний tool call и решение в аудите
+не совпадёт с командой.
 
 ```sh
 docker compose -f sandbox/compose.yaml run --rm -T agent \
   opencode run --standalone --model deepseek/deepseek-flash \
-  "Run exactly one shell tool call: ls. Do not do anything else."
+  "Run exactly one shell tool call: ls -la 2>/dev/null. Do not do anything else."
 ```
 
-Что проверять:
+Модель в примере — `deepseek/deepseek-flash`; финальный прогон в таблице ниже
+шёл на `opencode/gpt-5.4-mini`, потому что DeepSeek отвечал
+`Insufficient Balance`.
 
-- `ls` проходит и попадает в аудит как `allow`/`allowlist`;
-- `sudo -n true` отклоняется как `ask`/`hard-ask`;
-- `cat .env` отклоняется как `ask`/`guard:secret-env`.
+Последнее решение по каждому прогону:
 
-Приёмочный чек-лист. Отмечай по факту прогона, а не по ожиданию.
+```sh
+jq -c '{resources, verdict, source, rule}' \
+  sandbox/.runtime/audit/evaluate-*.jsonl | tail -n 1
+```
 
-- [ ] `ls` проходит без подтверждения, аудит пишет `allow`/`allowlist`.
+Для `cd` и внешних путей записи в аудите плагина нет: это действие
+`external_directory`, его решает OpenCode до хука. Смотри строку
+`permission requested: external_directory (...)` в выводе прогона.
+
+Приёмочный чек-лист #21. Отмечай по факту прогона, а не по ожиданию.
+
+- [ ] `ls -la 2>/dev/null` проходит без подтверждения: `allow`/`allowlist`,
+      `rule: ls`. Потоковый редирект не отменяет allowlist.
+- [ ] `sed -n '1,20p' README.md` получает `allow`/`allowlist`, `rule: sed`
+      (а не `source: model`, как до изменения).
 - [ ] `sudo -n true` остаётся `ask` с `source: hard-ask`, модель не
       вызывается.
-- [ ] Команда вне allowlist, безопасная по контексту (например,
-      `sed -n '1,20p' README.md`), получает `allow` с `source: model`.
+- [ ] `cat .env` остаётся `ask` с `rule: guard:secret-env`.
+- [ ] `git -C /tmp log` остаётся `ask` с `rule: guard:outside-cwd`: глобальный
+      флаг не даёт читать вне проекта.
+- [ ] `cd /tmp` остаётся `ask` и не выполняется: цель проверяет правило
+      `external_directory: * → ask`, плагин в этом действии не участвует.
+- [ ] `cd /tmp; cat notes.txt` остаётся `ask` и не читает `/tmp/notes.txt`:
+      запрос отклоняется на `cd`-цели до запуска shell.
+- [ ] `cd ..` остаётся `ask`: цель вне проекта.
+- [ ] `cd sandbox; ls` проходит: цель внутри проекта, `ls` разрешает
+      allowlist (`allow`/`allowlist`, `rule: ls`).
+- [ ] `cat ../notes.txt` остаётся `ask` с `rule: guard:outside-cwd`: shell-форму
+      ловит гард, а внешние пути, которые в shell-ресурсы не попадают, — правило
+      `external_directory`.
+- [ ] `node --version` получает `allow`/`allowlist`, `rule: trust`: префикс
+      объявлен в `trusted_commands` профиля и встроенной таблице неизвестен.
+
+Остальные проверки пакета:
+
 - [ ] Опасная команда внутри cwd (например, `rm build/old.log`) остаётся
       `ask` с `source: model`.
 - [ ] Повтор той же команды в том же cwd даёт `source: cache` и не вызывает
@@ -75,6 +106,33 @@ docker compose -f sandbox/compose.yaml run --rm -T agent \
 - [ ] `enabled: false` (V2 перезагружает плагин сам, `/reload` — если не
       подхватилось): `ls` снова спрашивает, `/classifier` пропадает из
       автодополнения.
+
+### Результат прогона
+
+Финальное состояние ветки `final-fixes`, коммит `8851c22`, образ
+`opencode-sandbox:2.2.4`, Node 26, 2026-11-01. Модель прогона —
+`opencode/gpt-5.4-mini`: DeepSeek на момент проверки отвечал
+`Insufficient Balance`.
+
+| Команда | Результат |
+|---|---|
+| `ls -la 2>/dev/null` | `allow` / `allowlist` / `ls` |
+| `sed -n '1,20p' README.md` | `allow` / `allowlist` / `sed` |
+| `sudo -n true` | `ask` / `hard-ask` / `sudo` |
+| `cat .env` | `ask` / `guard` / `guard:secret-env` |
+| `git -C /tmp log` | `ask` / `guard` / `guard:outside-cwd` |
+| `printf '\33]52;c;SGVsbG8='` | `ask` / `guard` / `guard:printf-escape` |
+| `cd /tmp` | `ask` / `external_directory` / `/tmp/*`, не выполнена |
+| `cd /tmp; cat notes.txt` | `ask` / `external_directory` / `/tmp/*`, `/tmp/notes.txt` не прочитан |
+| `cd ..` | `ask` / `external_directory` / `/home/node/*`, не выполнена |
+| `cd sandbox; ls` | `allow` / `allowlist` / `ls` |
+| `cat ../notes.txt` | `ask` / `guard` / `guard:outside-cwd` |
+| `node --version` | `allow` / `allowlist` / `trust` |
+
+`npm test` — 299 из 299, `npm run typecheck` — чисто, оба в контейнере.
+`cd`-цели и внешнее чтение проверяет OpenCode действием `external_directory`,
+поэтому в аудите плагина для них записи нет; это ожидаемо и описано в
+`docs/permissions.md`.
 
 System-смоук: включи `"include_system_context": true` в
 `sandbox/config/opencode.jsonc`, начни сессию, измени `AGENTS.md` и продолжи

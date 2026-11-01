@@ -353,11 +353,263 @@ test("allowlist does not allow commands it cannot prove read-only", async () => 
   }
 });
 
+test("sed allows only the bare print range", async () => {
+  const harness = await start();
+  try {
+    assert.equal(await verdict(harness, ["sed -n '1,120p' README.md"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "sed");
+
+    const asked = [
+      "sed -i s/a/b/ file",
+      "sed -e 's/x/y/' file",
+      "sed -n 's/x/y/p' file",
+      "sed -n '1,120p' file -i",
+      "sed -n '1~2p' file",
+    ];
+    for (const command of asked) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("gh allows only view and list on the read-only command groups", async () => {
+  const harness = await start();
+  const allowed: ReadonlyArray<readonly [string, string]> = [
+    ["gh issue view 7", "gh-issue-view"],
+    ["gh issue list", "gh-issue-list"],
+    ["gh pr view 7", "gh-pr-view"],
+    ["gh pr list", "gh-pr-list"],
+    ["gh repo view", "gh-repo-view"],
+    ["gh repo list", "gh-repo-list"],
+    ["gh run view 12", "gh-run-view"],
+    ["gh run list", "gh-run-list"],
+    ["gh release view v1", "gh-release-view"],
+    ["gh release list", "gh-release-list"],
+    ["gh workflow view ci.yml", "gh-workflow-view"],
+    ["gh workflow list", "gh-workflow-list"],
+    ["gh --version", "gh-version"],
+  ];
+  const asked = [
+    "gh api user",
+    "gh issue close 7",
+    "gh issue create",
+    "gh pr merge 7",
+    "gh run watch",
+    "gh auth status",
+  ];
+
+  try {
+    for (const [command, rule] of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+    for (const command of asked) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("git read subcommands are allowed", async () => {
+  const harness = await start();
+  const allowed: ReadonlyArray<readonly [string, string]> = [
+    ["git worktree list", "git-worktree-list"],
+    ["git remote get-url origin", "git-remote-get-url"],
+    ["git merge-base --is-ancestor a b", "git-merge-base"],
+    ["git ls-files", "git-ls-files"],
+    ["git rev-list HEAD", "git-rev-list"],
+    ["git for-each-ref", "git-for-each-ref"],
+    ["git config --get user.name", "git-config-get"],
+    ["git describe --tags", "git-describe"],
+    ["git shortlog -sn", "git-shortlog"],
+  ];
+  const asked = [
+    "git config user.name",
+    "git remote set-url origin x",
+    "git worktree add ../x",
+    "git config --get-all user.name",
+  ];
+
+  try {
+    for (const [command, rule] of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+    for (const command of asked) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("git global flags do not block the allowlist and -C stays inside cwd", async () => {
+  const harness = await start();
+  const guarded: ReadonlyArray<readonly [string, string]> = [
+    ["git -C /tmp log", "guard:outside-cwd"],
+    ["git -C ../other log", "guard:outside-cwd"],
+    ["git -C/tmp log", "guard:outside-cwd"],
+    ["git --git-dir=/tmp/repo status", "guard:outside-cwd"],
+    ["git -c core.pager=cat log", "guard:git-command-override"],
+    ["git --config-env=FOO log", "guard:git-command-override"],
+    ["git --exec-path=. log", "guard:git-command-override"],
+  ];
+
+  try {
+    assert.equal(await verdict(harness, ["git -C ./sub log --oneline -1"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "git-log");
+    assert.equal(await verdict(harness, ["git --no-pager diff --stat"]), "allow");
+    assert.equal(await verdict(harness, ["git -Csub status"]), "allow");
+    assert.equal(await verdict(harness, ["git --git-dir=.git status"]), "allow");
+
+    for (const [command, rule] of guarded) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    // A spaced `--exec-path` is not a value for git, so the shape falls through to the classifier.
+    const spacedExecPath = evaluation({ resources: ["git --exec-path evil log"] });
+    await harness.evaluate(spacedExecPath);
+    assert.equal(spacedExecPath.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "classifier");
+
+    // `--paginate` is still skipped for hard-ask, which must keep seeing `push` behind it.
+    const paginatePush = evaluation({ resources: ["git --paginate push"] });
+    await harness.evaluate(paginatePush);
+    assert.equal(paginatePush.effect, "ask");
+    const pushEntry = harness.auditEntries().at(-1);
+    assert.deepEqual(
+      { source: pushEntry?.["source"], rule: pushEntry?.["rule"] },
+      { source: "hard-ask", rule: "git-push" },
+    );
+
+    // The same flag forces a pager named in config, so the allowlist must not skip it silently.
+    const paginateLog = evaluation({ resources: ["git --paginate log"] });
+    await harness.evaluate(paginateLog);
+    assert.equal(paginateLog.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "guard:git-pager-override");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("pipeline helpers are allowed and sort cannot write a file", async () => {
+  const harness = await start();
+  const allowed: ReadonlyArray<readonly [string, string]> = [
+    ["cut -d, -f2 file", "cut"],
+    // The separator is a value, not a path: `/` here must not read as the filesystem root.
+    ["cut -d/ -f2 file", "cut"],
+    ["cut -d / -f2 file", "cut"],
+    // getopt keeps a value flag anywhere in the cluster: `-s` is a flag, `d/` is the delimiter value.
+    ["cut -sd/ -f2 file", "cut"],
+    ["tr a-z A-Z", "tr"],
+    ["tr -d /", "tr"],
+    ["nl README.md", "nl"],
+    ["nl -s/ file", "nl"],
+    ["nl -s / file", "nl"],
+    ["strings ./bin", "strings"],
+    ["printf '%s\\n' x", "printf"],
+    ["true", "true"],
+    ["sleep 1", "sleep"],
+    ["sort file", "sort"],
+    ["sort -n file", "sort"],
+    ["sort -t/ -k1 file", "sort"],
+    ["sort -t / -k1 file", "sort"],
+    // `-T` names a real directory, but `.` is inside cwd, so the value is not an escape.
+    ["sort -T . file", "sort"],
+  ];
+  const asked: ReadonlyArray<readonly [string, string]> = [
+    ["sort -o out.txt file", "guard:sort-output"],
+    ["sort --output=out.txt file", "guard:sort-output"],
+    ["sort -ro out.txt file", "guard:sort-output"],
+    ["sort --compress-program=./evil big.txt", "guard:sort-compress-program"],
+    ["sort --compress-program ./evil big.txt", "guard:sort-compress-program"],
+    ["sort --compress-p ./evil big.txt", "guard:sort-compress-program"],
+  ];
+
+  try {
+    for (const [command, rule] of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+    for (const [command, rule] of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("printf cannot smuggle terminal control escapes past the allowlist", async () => {
+  const harness = await start();
+  const asked: ReadonlyArray<readonly [string, string]> = [
+    // OSC 52 writes the clipboard; the format carries an octal escape, not a literal ESC byte, so the
+    // metacharacter guard (which keys on the raw byte) never sees it.
+    ["printf '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    // Bash and zsh accept octal without a leading zero, and `\E`/`\U` as ESC spellings too.
+    ["printf '\\33]52;c;SGVsbG8='", "guard:printf-escape"],
+    ["printf '\\E[2J'", "guard:printf-escape"],
+    ["printf '\\U0000001b[2J'", "guard:printf-escape"],
+    ["printf '\\x1b[2J'", "guard:printf-escape"],
+    ["printf '\\u001b[31m'", "guard:printf-escape"],
+    ["printf '\\e[2J'", "guard:printf-escape"],
+    ["printf '\\a'", "guard:printf-escape"],
+    ["printf '\\0'", "guard:printf-escape"],
+    // `%b` makes printf interpret escapes in the argument, so the format is not the only way in.
+    ["printf '%b' '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    // `-v` may carry the variable name in the same token; the format is still the next argument.
+    ["printf -vx '%b' '\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    // Every argument is scanned: a format that starts with `-v` is still a format.
+    ["printf -- '-v\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+    ["printf '-v\\033]52;c;SGVsbG8='", "guard:printf-escape"],
+  ];
+
+  try {
+    for (const [command, rule] of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+    }
+
+    // Plain formatting stays read-only: `\n` is a line break, not a control escape.
+    assert.equal(await verdict(harness, ["printf '%s\\n' x"]), "allow");
+    assert.equal(await verdict(harness, ["printf '%s %s\\n' a b"]), "allow");
+    assert.equal(await verdict(harness, ["printf -v out '%s\\n' x"]), "allow");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("cd stays out of the allowlist and a read-only pipeline is allowed", async () => {
+  const harness = await start();
+  try {
+    assert.equal(await verdict(harness, ["sort file", "cut -d, -f2"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "sort,cut");
+
+    for (const command of ["cd /tmp", "cd ..", "cd src"]) {
+      assert.equal(await verdict(harness, [command]), "ask", `${command} must ask`);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("guard cancels the allowlist for secrets and writes", async () => {
   const harness = await start();
   const cases: ReadonlyArray<readonly [ReadonlyArray<string>, string]> = [
     [["cat .env"], "guard:secret-env"],
     [["cat .env.local"], "guard:secret-env"],
+    // Normalizing the stream redirect must not hide the secret from the text guards.
+    [["cat .env 2>/dev/null"], "guard:secret-env"],
     [["cat ~/.ssh/id_rsa"], "guard:secret-ssh"],
     [["cat credentials.json"], "guard:secret-credentials"],
     [["cat /etc/hosts"], "guard:system-etc"],
@@ -379,6 +631,92 @@ test("guard cancels the allowlist for secrets and writes", async () => {
       await harness.evaluate(input);
       assert.equal(input.effect, "ask", `${resources.join(" ")} must ask`);
       assert.equal(harness.auditEntries().at(-1)?.["rule"], rule);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("stream redirects do not cancel the allowlist", async () => {
+  const harness = await start();
+  const allowed = [
+    "cat README.md 2>/dev/null",
+    "ls -la 2>&1",
+    "cat README.md >/dev/null",
+    "cat README.md 1>/dev/null",
+    "cat README.md > /dev/null 2>&1",
+    "echo hello >&2",
+    "cat README.md 2> /dev/null",
+    "cat README.md 22>/dev/null",
+    // Escaped and quoted redirect text is a literal argument, not a redirection.
+    "cat README.md 2\\>/dev/null",
+    "cat README.md '2>/dev/null'",
+  ];
+
+  try {
+    for (const command of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      const entry = harness.auditEntries().at(-1);
+      assert.equal(entry?.["source"], "allowlist", command);
+      // The audit keeps the command as typed; only the guard sees the normalized text.
+      assert.deepEqual(entry?.["resources"], [command], `${command} must stay verbatim in the audit`);
+    }
+    assert.equal(harness.modelCalls.length, 0);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("stream redirects do not defeat restricted allowlist rules", async () => {
+  const harness = await start();
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["git branch -a 2>&1", "git-branch"],
+    ["git remote -v 2>&1", "git-remote-v"],
+  ];
+
+  try {
+    for (const [command, rule] of cases) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
+      assert.deepEqual(harness.auditEntries().at(-1)?.["resources"], [command]);
+    }
+    // Normalizing the redirect must not widen the rule past its allowed tokens.
+    assert.equal(await verdict(harness, ["git branch -D main 2>&1"]), "ask");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("redirects to a file still cancel the allowlist", async () => {
+  const harness = await start();
+  const asked = [
+    "cat README.md > out.txt",
+    "cat README.md 2> err.log",
+    "cat README.md >> out.txt",
+    "cat README.md 2>>/dev/null",
+    "cat README.md > out.txt 2>&1",
+    "ls 2> /tmp/err",
+    // `&>` redirects both streams, but only a `/dev/null` target is recognised; keep the safe ask.
+    "cat README.md &>/dev/null",
+    // A quoted target is a file as far as this normalizer can prove; it does not parse quoting.
+    'cat README.md 2>"/dev/null"',
+    // Only the exact `/dev/null` target is a stream redirect: a longer name or a trailing
+    // non-separator character is a file.
+    "cat README.md >/dev/nulll",
+    "cat README.md 2>/dev/null.log",
+    "cat README.md >/dev/null\r",
+    "cat README.md >\u00a0/dev/null",
+    // A target followed by shell punctuation is left for the guard.
+    "cat README.md >/dev/null)",
+    "cat README.md >/dev/null;",
+  ];
+
+  try {
+    for (const command of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], "guard:redirect", command);
     }
   } finally {
     harness.dispose();
@@ -450,12 +788,18 @@ test("hard-ask sends privileged and irreversible commands to the human", async (
 test("rm inside cwd is not hard-ask, it falls through to the classifier", async () => {
   const harness = await start();
   try {
-    const input = evaluation({ resources: ["rm src/old.ts"] });
-    await harness.evaluate(input);
+    for (const command of ["rm src/old.ts", "rm -rf build > /dev/null"]) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
 
-    assert.equal(input.effect, "ask");
-    const entry = harness.auditEntries().at(-1);
-    assert.deepEqual({ source: entry?.["source"], rule: entry?.["rule"] }, { source: "model", rule: "classifier" });
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "model", rule: "classifier" },
+        command,
+      );
+    }
   } finally {
     harness.dispose();
   }
@@ -480,6 +824,214 @@ test("a compound call is allowed only when every resource is allowed", async () 
     assert.equal(await verdict(harness, ["git status", "npm install"]), "ask");
   } finally {
     harness.dispose();
+  }
+});
+
+test("a guard owns the verdict for every segment regardless of order", async () => {
+  // The model would allow everything here: only a guard that runs before the allowlist keeps this an ask.
+  const harness = await start({}, CWD, { probability: 0.99 });
+  const cases: ReadonlyArray<ReadonlyArray<string>> = [
+    ["python3 -c 'print(1)'", "cat ~/.ssh/id_rsa"],
+    ["cat ~/.ssh/id_rsa", "python3 -c 'print(1)'"],
+  ];
+
+  try {
+    for (const resources of cases) {
+      const input = evaluation({ resources });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${resources.join(" ; ")} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "guard", rule: "guard:secret-ssh" },
+        resources.join(" ; "),
+      );
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "a fired guard must never reach the model");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("a write redirect asks even when its program is unknown", async () => {
+  const harness = await start({}, CWD, { probability: 0.99 });
+  const cases = ["cmd 2> err.log", "python3 -c 'print(1)' 2> err.log"];
+
+  try {
+    for (const command of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "guard", rule: "guard:redirect" },
+        command,
+      );
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "the redirect guard must not pay for a model call");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("trusted commands allow a declared prefix with rule trust", async () => {
+  const harness = await start({ trusted_commands: ["npm test"] });
+  const allowed = ["npm test", "npm test 2>&1", "npm test -- --watch=false"];
+
+  try {
+    for (const command of allowed) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "allow", `${command} must be allowed`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "allowlist", rule: "trust" },
+        command,
+      );
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "a trusted command must not reach the model");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("a trusted segment joins the built-in rule names in the audit", async () => {
+  const harness = await start({ trusted_commands: ["npm test"] });
+  try {
+    assert.equal(await verdict(harness, ["ls", "npm test"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "ls,trust");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("an undeclared command stays with the classifier and a prefix matches whole tokens only", async () => {
+  const harness = await start({ trusted_commands: ["npm test"] });
+  const asked = [
+    // Not declared: the stock conservative behaviour must hold.
+    "npm run typecheck",
+    // Same prefix, longer token.
+    "npm testing",
+    // The prefix is compared as typed, global flags are not skipped.
+    "npm --prefix . test",
+  ];
+
+  try {
+    for (const command of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual(
+        { source: entry?.["source"], rule: entry?.["rule"] },
+        { source: "model", rule: "classifier" },
+        command,
+      );
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("trust cannot override hard-ask or a guard", async () => {
+  const harness = await start({
+    trusted_commands: ["sudo ls", "git push origin", "cat .env", "npm test"],
+  });
+  const cases: ReadonlyArray<readonly [string, string, string]> = [
+    ["sudo ls", "hard-ask", "sudo"],
+    ["git push origin main", "hard-ask", "git-push"],
+    ["cat .env", "guard", "guard:secret-env"],
+    ["npm test > out.log", "guard", "guard:redirect"],
+  ];
+
+  try {
+    for (const [command, source, rule] of cases) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      const entry = harness.auditEntries().at(-1);
+      assert.deepEqual({ source: entry?.["source"], rule: entry?.["rule"] }, { source, rule }, command);
+    }
+
+    assert.equal(harness.modelCalls.length, 0, "hard-ask and guards must not pay for a model call");
+
+    // A trusted segment does not disarm a hard-ask on its neighbour.
+    const compound = evaluation({ resources: ["npm test", "sudo ls"] });
+    await harness.evaluate(compound);
+    assert.equal(compound.effect, "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["source"], "hard-ask");
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("invalid trusted entries are ignored and do not crash the plugin", async () => {
+  const invalid: ReadonlyArray<unknown> = [
+    "npm test", // not an array
+    { 0: "npm test" },
+    42,
+    ["npm"], // one token
+    [""],
+    ["   "],
+    ["npm\ntest"], // a newline is shell syntax even though it tokenizes into the same prefix
+    ["npm test\r"], // CR is not a shell word boundary, but the tokenizer splits on it
+    ["npm\u00a0test"], // NBSP is not a shell separator, but the tokenizer splits on it
+    ["npm; rm -rf /"],
+    [null, 42],
+  ];
+
+  for (const trusted_commands of invalid) {
+    const harness = await start({ trusted_commands });
+    try {
+      assert.equal(await verdict(harness, ["ls"]), "allow", `${JSON.stringify(trusted_commands)}: plugin must keep working`);
+      assert.equal(await verdict(harness, ["npm test"]), "ask", `${JSON.stringify(trusted_commands)}: entry must be ignored`);
+    } finally {
+      harness.dispose();
+    }
+  }
+
+  // A broken neighbour does not discard the valid entry.
+  const mixed = await start({ trusted_commands: ["npm test", null, 42] });
+  try {
+    assert.equal(await verdict(mixed, ["npm test"]), "allow");
+  } finally {
+    mixed.dispose();
+  }
+
+  // A backslash is not unescaped by the tokenizer, so the declared token would not be the command the
+  // shell runs: the entry is dropped instead of matching the escaped spelling.
+  const escaped = await start({ trusted_commands: ["npm\\ test"] });
+  try {
+    assert.equal(await verdict(escaped, ["npm\\ test"]), "ask");
+  } finally {
+    escaped.dispose();
+  }
+});
+
+test("trusted commands are capped at fifty entries", async () => {
+  const declared = Array.from({ length: 50 }, (_, index) => `npm t${index}`);
+  const harness = await start({ trusted_commands: [...declared, "npm overflow"] });
+
+  try {
+    assert.equal(await verdict(harness, ["npm t0"]), "allow");
+    assert.equal(await verdict(harness, ["npm t49"]), "allow");
+    assert.equal(await verdict(harness, ["npm overflow"]), "ask");
+    assert.equal(harness.auditEntries().at(-1)?.["source"], "model");
+  } finally {
+    harness.dispose();
+  }
+
+  // The cap is positional: a valid entry after the fiftieth slot is still ignored.
+  const late = await start({ trusted_commands: [...Array.from({ length: 50 }, () => "npm"), "npm test"] });
+  try {
+    assert.equal(await verdict(late, ["npm test"]), "ask");
+  } finally {
+    late.dispose();
   }
 });
 
@@ -1014,6 +1566,15 @@ test("reads are allowed only inside the working directory", async () => {
     ["cat ../x", "guard:outside-cwd"],
     ["cat ~/notes.txt", "guard:outside-cwd"],
     ["cat /Users/other/file", "guard:outside-cwd"],
+    ["cat /tmp/x", "guard:outside-cwd"],
+    ["git -C /tmp log", "guard:outside-cwd"],
+    // `-T` and `--temporary-directory` are real paths even though other sort values are not.
+    ["sort -T /tmp file", "guard:outside-cwd"],
+    ["sort -T/tmp file", "guard:outside-cwd"],
+    ["sort --temporary-directory=/tmp file", "guard:outside-cwd"],
+    ["sort --temporary-directory /tmp file", "guard:outside-cwd"],
+    // A no-value flag before `-T` in the same cluster must not hide the path value.
+    ["sort -sT/tmp file", "guard:outside-cwd"],
     ["ls ../../..", "guard:outside-cwd"],
     ["du -a /", "guard:outside-cwd"],
     ["rg TODO ~", "guard:outside-cwd"],
