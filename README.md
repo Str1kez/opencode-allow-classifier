@@ -31,6 +31,10 @@
 `trusted_commands` расширяет allowlist префиксами вида `npm test`; границы
 опции — в [docs/permissions.md#trusted_commands](docs/permissions.md#trusted_commands).
 
+Опция читается из конфига, в котором объявлен плагин: глобальная установка
+действует на все проекты, `install --project` пишет `./opencode.jsonc` и
+ограничивает `trusted_commands` текущим проектом.
+
 Проверка после установки: `ls` проходит без подтверждения, `sudo -n true`
 спрашивает, в TUI есть `/classifier`.
 
