@@ -847,6 +847,16 @@ test("trusted commands allow a declared prefix with rule trust", async () => {
   }
 });
 
+test("a trusted segment joins the built-in rule names in the audit", async () => {
+  const harness = await start({ trusted_commands: ["npm test"] });
+  try {
+    assert.equal(await verdict(harness, ["ls", "npm test"]), "allow");
+    assert.equal(harness.auditEntries().at(-1)?.["rule"], "ls,trust");
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("an undeclared command stays with the classifier and a prefix matches whole tokens only", async () => {
   const harness = await start({ trusted_commands: ["npm test"] });
   const asked = [
@@ -916,6 +926,8 @@ test("invalid trusted entries are ignored and do not crash the plugin", async ()
     [""],
     ["   "],
     ["npm\ntest"], // a newline is shell syntax even though it tokenizes into the same prefix
+    ["npm test\r"], // CR is not a shell word boundary, but the tokenizer splits on it
+    ["npm\u00a0test"], // NBSP is not a shell separator, but the tokenizer splits on it
     ["npm; rm -rf /"],
     [null, 42],
   ];

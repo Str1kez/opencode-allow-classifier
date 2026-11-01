@@ -265,6 +265,9 @@ function matchesAllowlist(rule: AllowlistRule, tokens: ReadonlyArray<string>): b
  * the operator's call, and the hard-ask and guard stages already ran before this one.
  */
 function matchesTrusted(trusted: TrustedCommand, tokens: ReadonlyArray<string>): boolean {
+  // `decide` is a public seam: callers may pass prefixes that never went through `parseTrustedCommands`.
+  // An empty prefix must never match, even though the option parser already rejects one.
+  if (trusted.length < 2) return false;
   if (tokens.length < trusted.length) return false;
   return trusted.every((expected, index) => tokens[index] === expected);
 }

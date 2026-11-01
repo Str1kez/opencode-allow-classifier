@@ -6,7 +6,7 @@
  */
 
 import { DEFAULT_MODEL, SAFETY_THRESHOLD } from "./classifier.ts";
-import { hasActiveShellSyntax, tokenize } from "./shell.ts";
+import { hasActiveShellSyntax, hasForeignWhitespace, tokenize } from "./shell.ts";
 
 /** `ctx.storage` key holding the TUI-selected model. Namespaced by the host, so the bare name is enough. */
 export const MODEL_OVERRIDE_KEY = "model_override";
@@ -97,7 +97,14 @@ export function parseTrustedCommands(value: unknown): ReadonlyArray<TrustedComma
 
   const commands: TrustedCommand[] = [];
   for (const entry of value.slice(0, MAX_TRUSTED_COMMANDS)) {
-    if (typeof entry !== "string" || entry.includes("\\") || hasActiveShellSyntax(entry)) continue;
+    if (
+      typeof entry !== "string" ||
+      entry.includes("\\") ||
+      hasForeignWhitespace(entry) ||
+      hasActiveShellSyntax(entry)
+    ) {
+      continue;
+    }
 
     const tokens = tokenize(entry);
     if (tokens.length < 2) continue;
