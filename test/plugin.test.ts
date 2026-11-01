@@ -385,6 +385,60 @@ test("guard cancels the allowlist for secrets and writes", async () => {
   }
 });
 
+test("stream redirects do not cancel the allowlist", async () => {
+  const harness = await start();
+  const allowed = [
+    "cat README.md 2>/dev/null",
+    "ls -la 2>&1",
+    "cat README.md >/dev/null",
+    "cat README.md 1>/dev/null",
+    "cat README.md > /dev/null 2>&1",
+    "echo hello >&2",
+    "cat README.md 2> /dev/null",
+    "cat README.md 22>/dev/null",
+  ];
+
+  try {
+    for (const command of allowed) {
+      assert.equal(await verdict(harness, [command]), "allow", `${command} must be allowed`);
+      const entry = harness.auditEntries().at(-1);
+      assert.equal(entry?.["source"], "allowlist", command);
+      // The audit keeps the command as typed; only the guard sees the normalized text.
+      assert.deepEqual(entry?.["resources"], [command], `${command} must stay verbatim in the audit`);
+    }
+    assert.equal(harness.modelCalls.length, 0);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("redirects to a file still cancel the allowlist", async () => {
+  const harness = await start();
+  const asked = [
+    "cat README.md > out.txt",
+    "cat README.md 2> err.log",
+    "cat README.md >> out.txt",
+    "cat README.md 2>>/dev/null",
+    "cat README.md > out.txt 2>&1",
+    // `&>` redirects both streams, but only a `/dev/null` target is recognised; keep the safe ask.
+    "cat README.md &>/dev/null",
+    // Only the exact `/dev/null` target is a stream redirect: a longer name is a file.
+    "cat README.md >/dev/nulll",
+    "cat README.md 2>/dev/null.log",
+  ];
+
+  try {
+    for (const command of asked) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], "guard:redirect", command);
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("output-short-flag applies to git only", async () => {
   const harness = await start();
   // `find` uses `-o` as OR, `grep`/`rg` as "only matching"; none of them writes through it.

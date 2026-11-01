@@ -16,6 +16,7 @@ import {
   resolvesOutsideCwd,
   resolvesToCwd,
   shellActiveText,
+  stripStreamRedirects,
   tokenize,
   type RealPathResolver,
 } from "./shell.ts";
@@ -145,6 +146,18 @@ function skipGlobalFlags(program: string, args: ReadonlyArray<string>): Readonly
   }
 
   return args.slice(index);
+}
+
+function segmentOf(text: string): Segment {
+  return { text, expanded: text.replace(/["']/g, ""), tokens: tokenize(text) };
+}
+
+/**
+ * The guards run on a normalized command: stream redirections write no file, so `2>&1` and
+ * `2>/dev/null` must not be read as writes. The allowlist and the audit keep the command as typed.
+ */
+function segmentForGuards(segment: Segment): Segment {
+  return segmentOf(stripStreamRedirects(segment.text));
 }
 
 /** Operands of `rm`: flags dropped, `--` honoured, `-` (stdin) is not a path. */
@@ -413,11 +426,8 @@ export function decide(
   realpath?: RealPathResolver,
 ): Decision {
   const started = performance.now();
-  const segments: Segment[] = resources.map((text) => ({
-    text,
-    expanded: text.replace(/["']/g, ""),
-    tokens: tokenize(text),
-  }));
+  const segments: Segment[] = resources.map(segmentOf);
+  const guarded = segments.map(segmentForGuards);
 
   if (segments.length === 0) {
     return finish({ verdict: "ask", source: "default", rule: "empty-resources", probability: null, model: null }, started);
@@ -432,13 +442,13 @@ export function decide(
 
   const allowlistRules: string[] = [];
 
-  for (const segment of segments) {
+  for (const [index, segment] of segments.entries()) {
     const rule = ALLOWLIST_RULES.find((candidate) => matchesAllowlist(candidate, segment.tokens));
     if (rule === undefined) {
       return finish({ verdict: "ask", source: "default", rule: "no-allowlist-match", probability: null, model: null }, started);
     }
 
-    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, segment, cwd, realpath));
+    const guard = GUARD_RULES.find((candidate) => matchesGuard(candidate, guarded[index]!, cwd, realpath));
     if (guard !== undefined) {
       return finish(
         { verdict: "ask", source: "allowlist", rule: `guard:${guard.name}`, probability: null, model: null },
