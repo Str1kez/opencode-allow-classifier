@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openCodeStateDirectory } from "../src/paths.ts";
 import { decide, type Decision } from "../src/policy.ts";
-import { inspectConfig, type InspectReport, type PluginReport } from "./inspect.ts";
+import { inspectConfig, type InspectReport, type PluginReport, type WarningCode } from "./inspect.ts";
 import { JsoncSyntaxError } from "./jsonc.ts";
+import { tokenize } from "../src/shell.ts";
 
 /** The dependency set the plugin cannot start without. */
 const REQUIRED_DEPENDENCIES = ["@opencode/plugin", "effect"] as const;
@@ -22,17 +23,22 @@ interface DryRunCase {
   readonly verdict: Decision["verdict"];
   readonly source: Decision["source"];
   readonly rule: string;
+  /** A feature probe, not a fixed table entry: a mismatch means the config cannot demonstrate it. */
+  readonly optional?: boolean;
 }
 
 /**
- * One representative per lever: hard-ask, the secret guard, the outside-cwd guard and a plain
- * read-only command. `decide()` is pure, so the dry run proves the rule tables without running
+ * One representative per lever: hard-ask, the secret guard, the write guard, the outside-cwd guard and
+ * a plain read-only command. `decide()` is pure, so the dry run proves the rule tables without running
  * anything.
  */
 const DRY_RUN_CASES: readonly DryRunCase[] = [
   { command: "sudo -n true", verdict: "ask", source: "hard-ask", rule: "sudo" },
   { command: "cat .env", verdict: "ask", source: "guard", rule: "guard:secret-env" },
   { command: "cat ../secret.txt", verdict: "ask", source: "guard", rule: "guard:outside-cwd" },
+  { command: "sed -n '1,120p' README.md", verdict: "allow", source: "allowlist", rule: "sed" },
+  { command: "sort -o out.txt", verdict: "ask", source: "guard", rule: "guard:sort-output" },
+  { command: "git -C /tmp log", verdict: "ask", source: "guard", rule: "guard:outside-cwd" },
   { command: "ls", verdict: "allow", source: "allowlist", rule: "ls" },
 ];
 
@@ -49,6 +55,7 @@ export interface DryRunResult {
   readonly expected: string;
   readonly actual: string;
   readonly matches: boolean;
+  readonly status: "pass" | "fail" | "skip";
 }
 
 export interface AuditLocation {
@@ -88,12 +95,12 @@ export function runVerify(path: string, options: VerifyOptions): VerifyReport {
   const checks: VerifyCheck[] = [
     config.check,
     ...pluginChecks(config.report.plugin),
-    ...warningChecks(config.report.warnings),
+    ...warningChecks(config.report),
     checkHarnessVersion(options.harnessVersion),
     checkDependencies(options.depsRoot),
   ];
-  const dryRun = runDryRun();
-  const ok = checks.every((check) => check.status !== "fail") && dryRun.every((result) => result.matches);
+  const dryRun = runDryRun(config.report.plugin.trustedCommands);
+  const ok = checks.every((check) => check.status !== "fail") && dryRun.every((result) => result.status !== "fail");
 
   return {
     configPath: path,
@@ -114,11 +121,13 @@ export function formatVerifyText(report: VerifyReport): string {
   if (report.dryRun.length > 0) {
     lines.push("dry run (no command executed):");
     for (const result of report.dryRun) {
-      lines.push(
-        result.matches
-          ? `  PASS ${result.command} -> ${result.expected}`
-          : `  FAIL ${result.command} -> expected ${result.expected}, got ${result.actual}`,
-      );
+      if (result.status === "pass") {
+        lines.push(`  PASS ${result.command} -> ${result.expected}`);
+      } else if (result.status === "skip") {
+        lines.push(`  SKIP ${result.command} -> ${result.actual}; no declared prefix yields allow / allowlist / trust`);
+      } else {
+        lines.push(`  FAIL ${result.command} -> expected ${result.expected}, got ${result.actual}`);
+      }
     }
   }
 
@@ -179,31 +188,38 @@ function pluginChecks(plugin: PluginReport): VerifyCheck[] {
 }
 
 /** Plugin problems already have structural checks above; repeating them as raw warnings is noise. */
-const PLUGIN_WARNING = /^(plugins|plugin )/;
+const PLUGIN_WARNING_CODE: WarningCode = "plugin";
 
 /**
- * `inspect` explains policy gaps as text; `verify` must not stay green when one of them means the
- * installed policy is incomplete. A missing catch-all, the external_directory rule or a required
- * deny makes the protection weaker, so they fail. A stricter-than-asked rule or a dead narrower
- * exception only warns: the mandatory rule is present and the policy stays closed.
+ * Codes that mean the installed policy is weaker than the mandatory layout: a missing or misplaced
+ * catch-all, the external_directory rule, or a required deny. `verify` must not stay green on them.
+ *
+ * Everything else only warns. A stricter-than-asked rule (`external-directory-stricter`) or a dead
+ * narrower exception closes the policy further: the mandatory rule is present and nothing is exposed.
  */
-function warningChecks(warnings: readonly string[]): VerifyCheck[] {
-  return warnings
-    .filter((warning) => !PLUGIN_WARNING.test(warning))
-    .map((warning) => ({ name: "policy", status: warningStatus(warning), message: warning }));
+const FAILING_WARNING_CODES: ReadonlySet<WarningCode> = new Set<WarningCode>([
+  "duplicate-key",
+  "permissions",
+  "catch-all-missing",
+  "catch-all-multiple",
+  "catch-all-order",
+  "external-directory-missing",
+  "external-directory-effect",
+  "external-directory-multiple",
+  "deny-missing",
+  "deny-order",
+]);
+
+function warningChecks(report: InspectReport): VerifyCheck[] {
+  return report.warnings.flatMap((warning, index) => {
+    const code = report.warningCodes[index];
+    if (code === undefined || code === PLUGIN_WARNING_CODE) return [];
+    return [{ name: "policy", status: warningStatus(code), message: warning }];
+  });
 }
 
-function warningStatus(warning: string): VerifyStatus {
-  if (warning.startsWith("external_directory") || warning.startsWith("multiple external_directory")) {
-    const stricter = warning.includes('has effect "deny"');
-    const deadException = warning.includes("comes before the catch-all");
-    return stricter || deadException ? "warn" : "fail";
-  }
-  if (warning.startsWith("duplicate key")) return "fail";
-  if (warning.startsWith("permissions")) return "fail";
-  if (warning.startsWith("catch-all") || warning.startsWith("multiple catch-all")) return "fail";
-  if (warning.startsWith("deny rule")) return "fail";
-  return "warn";
+function warningStatus(code: WarningCode): VerifyStatus {
+  return FAILING_WARNING_CODES.has(code) ? "fail" : "warn";
 }
 
 function checkHarnessVersion(override: string | undefined): VerifyCheck {
@@ -262,19 +278,53 @@ function checkDependencies(depsRoot: string): VerifyCheck {
   };
 }
 
-function runDryRun(): DryRunResult[] {
+function runDryRun(trustedCommands: readonly (readonly string[])[]): DryRunResult[] {
   // A throwaway cwd makes the outside-cwd guard deterministic without touching the caller's tree.
   const cwd = mkdtempSync(join(tmpdir(), "ocac-verify-"));
   try {
-    return DRY_RUN_CASES.map((testCase) => {
-      const decision = decide([testCase.command], cwd);
+    return [...DRY_RUN_CASES, ...trustedDryRunCase(trustedCommands, cwd)].map((testCase) => {
+      const decision = decide([testCase.command], cwd, { trustedCommands });
       const expected = `${testCase.verdict} / ${testCase.source} / ${testCase.rule}`;
       const actual = `${decision.verdict} / ${decision.source} / ${decision.rule}`;
-      return { command: testCase.command, expected, actual, matches: actual === expected };
+      const matches = actual === expected;
+      const status = matches ? "pass" : testCase.optional === true ? "skip" : "fail";
+      return { command: testCase.command, expected, actual, matches, status };
     });
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+}
+
+/**
+ * One declared prefix proves `trusted_commands` reaches `decide`. Prefixes that a hard-ask or a guard
+ * overrides cannot demonstrate trust, so the first prefix that actually yields `trust` is used. When
+ * every prefix is overridden, the case is a skip: the config is valid, there is just nothing to prove.
+ *
+ * `inspect` reports the list already tokenized, so a command is rebuilt only when joining the tokens
+ * reproduces the same words. A quoted argument with a space (`node -e "a b"`) does not survive the
+ * round trip; skipping it is better than failing the dry run on a config that the plugin accepts.
+ */
+function trustedDryRunCase(trustedCommands: readonly (readonly string[])[], cwd: string): DryRunCase[] {
+  const commands = trustedCommands.flatMap((prefix) => {
+    const command = prefix.join(" ");
+    return tokenize(command).join("\u0000") === prefix.join("\u0000") ? [command] : [];
+  });
+  const first = commands[0];
+  if (first === undefined) return [];
+
+  const trusted = commands.find((command) => {
+    const decision = decide([command], cwd, { trustedCommands });
+    return decision.verdict === "allow" && decision.source === "allowlist" && decision.rule === "trust";
+  });
+  return [
+    {
+      command: trusted ?? first,
+      verdict: "allow",
+      source: "allowlist",
+      rule: "trust",
+      optional: trusted === undefined,
+    },
+  ];
 }
 
 function errorMessage(error: unknown): string {

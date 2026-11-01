@@ -177,6 +177,12 @@ export type GuardRule =
   /** `find -exec PROG`: every spawned program must be read-only and resolved through a trusted path. */
   | { readonly name: string; readonly kind: "find-exec"; readonly program?: string }
   /**
+   * `printf` turns escapes in its format into bytes before anything reaches the terminal. `\0` (octal),
+   * `\x`, `\u`, `\e` and `\a` can build OSC/CSI sequences that the literal-ESC check never sees, and
+   * `%b` applies the same interpretation to an argument.
+   */
+  | { readonly name: string; readonly kind: "printf-escape"; readonly program?: string }
+  /**
    * A global flag that changes which program git runs: `-c`/`--config-env` values such as `core.pager`,
    * `diff.external` or `alias.*` name a program, and `--exec-path=` points the subcommand lookup at a
    * directory. Such a segment is not read-only.
@@ -246,6 +252,9 @@ export const GUARD_RULES: readonly GuardRule[] = [
   { name: "stdin-read", kind: "token", values: ["-"] },
   // `jq -n env` and `jq -n 'env.HOME'` print the whole environment without touching a file.
   { name: "jq-environment", kind: "substring", value: "env", program: "jq" },
+  // `printf '\033]52;c;…'` builds an OSC 52 clipboard write from text, so no literal ESC byte appears
+  // in the resource and the metacharacter guard below never fires.
+  { name: "printf-escape", kind: "printf-escape", program: "printf" },
 
   // Any write: `>` also covers `>>`, `2>` and `&>`.
   { name: "redirect", kind: "active-substring", value: ">" },
@@ -323,7 +332,9 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // braces, backslashes, history expansion, globs and bracket expressions. Checked on the raw resource
   // before tokenization, because tokenizing glues `;` to the preceding word. Deliberately noisy:
   // `rg "a|b"` asks. A false ask costs one keypress, a false allow costs a shell.
-  // `%x` is git's hex-escape form and can emit an ESC byte; the literal ESC covers printf and echo.
+  // `%x` is git's hex-escape form; git expands it into an ESC byte, so the raw resource carries no
+  // literal ESC. A literal ESC byte is covered by the last value; printf escapes are handled by the
+  // `printf-escape` guard above because `\033` and friends are plain text until printf interprets them.
   {
     name: "shell-metacharacter",
     kind: "metacharacter",

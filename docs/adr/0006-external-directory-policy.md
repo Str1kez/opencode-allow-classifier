@@ -3,7 +3,7 @@
 **Status**: accepted
 
 Плагин видит только shell-ресурсы. Смена каталога в них не попадает: OpenCode
-2.2.x разбирает `cd <путь>` до permission-хука и передаёт цель отдельным
+2.2.4 разбирает `cd <путь>` до permission-хука и передаёт цель отдельным
 действием `external_directory`. Туда же уходят чтение и редактирование вне
 проекта. По умолчанию это действие разрешено, поэтому `cd /tmp` выполнялся
 молча, а `cd /tmp; cat notes.txt` плагин проверял как `cat notes.txt` с cwd
@@ -15,6 +15,36 @@
 плагина нельзя: хук не получает ни полную команду, ни рабочий каталог
 исполнения. Официальное руководство V2 предлагает для этого случая правило
 `external_directory`, а не плагинный хук.
+
+## Как проверено
+
+OpenCode 2.2.4 в sandbox-контейнере, профиль `sandbox/config/opencode.jsonc`,
+headless-прогон:
+
+```sh
+docker compose -f sandbox/compose.yaml run --rm -T agent \
+  opencode run --standalone --model opencode/gpt-5.4-mini \
+  "Run exactly one shell tool call: cd /tmp. Do not do anything else."
+```
+
+С правилом:
+
+```text
+! permission requested: external_directory (/tmp/*); auto-rejecting
+✗ cd /tmp failed
+```
+
+Без правила (временно убранного из профиля) прогон `cd /tmp; pwd` выполняется
+и печатает `/tmp`:
+
+```text
+$ cd /tmp; pwd
+/tmp
+```
+
+По умолчанию действие разрешено; именно правило `ask` превращает `cd /tmp`
+в подтверждение. Прогон без правила — разовая проверка дефолта, профиль в
+репозитории остаётся с правилом.
 
 ## Решение
 

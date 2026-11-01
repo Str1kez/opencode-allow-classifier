@@ -56,6 +56,10 @@ docker compose -f sandbox/compose.yaml run --rm -T agent \
   "Run exactly one shell tool call: ls -la 2>/dev/null. Do not do anything else."
 ```
 
+Модель в примере — `deepseek/deepseek-flash`; финальный прогон в таблице ниже
+шёл на `opencode/gpt-5.4-mini`, потому что DeepSeek отвечал
+`Insufficient Balance`.
+
 Последнее решение по каждому прогону:
 
 ```sh
@@ -105,8 +109,10 @@ jq -c '{resources, verdict, source, rule}' \
 
 ### Результат прогона
 
-Финальное состояние ветки `ticket-21`, образ `opencode-sandbox:2.2.4`,
-Node 26, 2026-11-01:
+Финальное состояние ветки `final-fixes`, коммит `8851c22`, образ
+`opencode-sandbox:2.2.4`, Node 26, 2026-11-01. Модель прогона —
+`opencode/gpt-5.4-mini`: DeepSeek на момент проверки отвечал
+`Insufficient Balance`.
 
 | Команда | Результат |
 |---|---|
@@ -115,14 +121,15 @@ Node 26, 2026-11-01:
 | `sudo -n true` | `ask` / `hard-ask` / `sudo` |
 | `cat .env` | `ask` / `guard` / `guard:secret-env` |
 | `git -C /tmp log` | `ask` / `guard` / `guard:outside-cwd` |
+| `printf '\33]52;c;SGVsbG8='` | `ask` / `guard` / `guard:printf-escape` |
 | `cd /tmp` | `ask` / `external_directory` / `/tmp/*`, не выполнена |
-| `cd /tmp; cat notes.txt` | `ask` / `external_directory`, `/tmp/notes.txt` не прочитан |
-| `cd ..` | `ask` / `external_directory`, не выполнена |
+| `cd /tmp; cat notes.txt` | `ask` / `external_directory` / `/tmp/*`, `/tmp/notes.txt` не прочитан |
+| `cd ..` | `ask` / `external_directory` / `/home/node/*`, не выполнена |
 | `cd sandbox; ls` | `allow` / `allowlist` / `ls` |
 | `cat ../notes.txt` | `ask` / `guard` / `guard:outside-cwd` |
 | `node --version` | `allow` / `allowlist` / `trust` |
 
-`npm test` — 288 из 288, `npm run typecheck` — чисто, оба в контейнере.
+`npm test` — 299 из 299, `npm run typecheck` — чисто, оба в контейнере.
 `cd`-цели и внешнее чтение проверяет OpenCode действием `external_directory`,
 поэтому в аудите плагина для них записи нет; это ожидаемо и описано в
 `docs/permissions.md`.

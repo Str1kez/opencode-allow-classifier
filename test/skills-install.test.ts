@@ -434,6 +434,31 @@ test("inspect warns when a narrower external_directory rule precedes the catch-a
   assert.match(text.stdout, /the narrower rule is dead/);
 });
 
+test("inspect exposes stable warning codes next to the prose warnings", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(
+    config,
+    `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "/reference/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
+  ],
+  "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "enabled": true } }],
+}
+`,
+  );
+
+  const result = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout) as { warnings: string[]; warningCodes: string[] };
+
+  // Prose is still the source of truth for humans; the codes are what automation keys on.
+  assert.equal(report.warningCodes.length, report.warnings.length);
+  assert.ok(report.warningCodes.includes("external-directory-dead-exception"));
+});
+
 test("inspect does not read the kill switch from a foreign plugin entry", (t) => {
   const directory = scratch(t);
   const config = join(directory, "opencode.jsonc");
