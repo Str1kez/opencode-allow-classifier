@@ -34,8 +34,24 @@
 Проверка после установки: `ls` проходит без подтверждения, `sudo -n true`
 спрашивает, в TUI есть `/classifier`.
 
-Если агент недоступен, тот же конфиг ставится руками: готовый фрагмент и
-порядок правил — в [docs/permissions.md](docs/permissions.md).
+Если агент недоступен, добавь в `opencode.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" }
+    // Deny-правила и полная политика — в docs/permissions.md.
+  ],
+  "plugins": [
+    {
+      "package": "/absolute/path/to/opencode-allow-classifier",
+      "options": { "trusted_commands": ["npm test", "npm run typecheck"] }
+    }
+  ]
+}
+```
 
 ## Документация
 
@@ -45,4 +61,5 @@
   молчит или спрашивает лишнее.
 - [.opencode/skills/README.md](.opencode/skills/README.md): скиллы установки
   и разбора аудита.
+- [sandbox/README.md](sandbox/README.md): контейнер и приёмочный чек-лист.
 - [CHANGELOG.md](CHANGELOG.md): история изменений.

@@ -88,6 +88,7 @@ export function runVerify(path: string, options: VerifyOptions): VerifyReport {
   const checks: VerifyCheck[] = [
     config.check,
     ...pluginChecks(config.report.plugin),
+    ...warningChecks(config.report.warnings),
     checkHarnessVersion(options.harnessVersion),
     checkDependencies(options.depsRoot),
   ];
@@ -175,6 +176,34 @@ function pluginChecks(plugin: PluginReport): VerifyCheck[] {
         : { name: "kill switch", status: "warn", message: "unknown (options or enabled missing); defaults to enabled" };
 
   return [entry, killSwitch];
+}
+
+/** Plugin problems already have structural checks above; repeating them as raw warnings is noise. */
+const PLUGIN_WARNING = /^(plugins|plugin )/;
+
+/**
+ * `inspect` explains policy gaps as text; `verify` must not stay green when one of them means the
+ * installed policy is incomplete. A missing catch-all, the external_directory rule or a required
+ * deny makes the protection weaker, so they fail. A stricter-than-asked rule or a dead narrower
+ * exception only warns: the mandatory rule is present and the policy stays closed.
+ */
+function warningChecks(warnings: readonly string[]): VerifyCheck[] {
+  return warnings
+    .filter((warning) => !PLUGIN_WARNING.test(warning))
+    .map((warning) => ({ name: "policy", status: warningStatus(warning), message: warning }));
+}
+
+function warningStatus(warning: string): VerifyStatus {
+  if (warning.startsWith("external_directory") || warning.startsWith("multiple external_directory")) {
+    const stricter = warning.includes('has effect "deny"');
+    const deadException = warning.includes("comes before the catch-all");
+    return stricter || deadException ? "warn" : "fail";
+  }
+  if (warning.startsWith("duplicate key")) return "fail";
+  if (warning.startsWith("permissions")) return "fail";
+  if (warning.startsWith("catch-all") || warning.startsWith("multiple catch-all")) return "fail";
+  if (warning.startsWith("deny rule")) return "fail";
+  return "warn";
 }
 
 function checkHarnessVersion(override: string | undefined): VerifyCheck {

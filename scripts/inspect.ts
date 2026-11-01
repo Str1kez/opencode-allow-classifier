@@ -117,6 +117,21 @@ export function inspectConfig(text: string, path: string, packageRoot: string): 
       `multiple external_directory rules at indexes ${externalDirectoryRules.map((rule) => rule.index).join(", ")}`,
     );
   }
+  if (externalDirectory !== undefined) {
+    // Last match wins: a narrower rule before the catch-all can never apply, so its exception is dead.
+    const deadExceptions = rules.filter(
+      (rule) =>
+        rule.action === EXTERNAL_DIRECTORY_RULE.action &&
+        typeof rule.resource === "string" &&
+        rule.resource !== EXTERNAL_DIRECTORY_RULE.resource &&
+        rule.index < externalDirectory.index,
+    );
+    for (const rule of deadExceptions) {
+      warnings.push(
+        `external_directory rule ${JSON.stringify(rule.resource)} at index ${rule.index} comes before the catch-all at index ${externalDirectory.index}; the catch-all wins by last match, so the narrower rule is dead`,
+      );
+    }
+  }
 
   const denyRules = shellRules.filter((rule) => rule.effect === "deny");
   const denyResources = new Set(denyRules.map((rule) => rule.resource));

@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { manifestPathFor, readManifest } from "../scripts/install-manifest.ts";
+import { contentHash, manifestPathFor, readManifest } from "../scripts/install-manifest.ts";
 import { cleanConfigText } from "../scripts/layout.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -202,6 +202,50 @@ test("rollback removes the external_directory ask rule install added", (t) => {
 
   assert.equal(rolled.status, 0, rolled.stderr);
   assert.equal(readFileSync(config, "utf8"), original);
+});
+
+test("rollback leaves an external_directory rule that an old manifest does not list", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+  ],
+}
+`;
+  writeFileSync(config, original);
+
+  const installed = run(["install", "--config", config], { cwd: directory });
+  assert.equal(installed.status, 0, installed.stderr);
+
+  const withExternal = readFileSync(config, "utf8");
+  const externalLine = '    { "action": "external_directory", "resource": "*", "effect": "ask" },\n';
+  const legacyInstalled = withExternal.replace(externalLine, "");
+  assert.notEqual(legacyInstalled, withExternal);
+
+  // An old install knew nothing about external_directory; the user added the rule by hand later.
+  const manifestPath = manifestPathFor(config, { XDG_STATE_HOME: join(directory, "state") });
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    postInstallHash: string;
+    additions: Record<string, unknown>;
+  };
+  manifest.postInstallHash = contentHash(legacyInstalled);
+  delete manifest.additions.externalDirectory;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  writeFileSync(
+    config,
+    legacyInstalled.replace(
+      '    { "action": "shell", "resource": "*", "effect": "ask" },\n',
+      `    { "action": "shell", "resource": "*", "effect": "ask" },\n${externalLine}`,
+    ),
+  );
+
+  const rolled = run(["rollback", "--config", config], { cwd: directory });
+
+  assert.equal(rolled.status, 0, rolled.stderr);
+  assert.match(rolled.stdout, /rolled back/);
+  assert.match(readFileSync(config, "utf8"), /"action": "external_directory", "resource": "\*", "effect": "ask"/);
 });
 
 test("rollback restores a plugin string that install replaced", (t) => {

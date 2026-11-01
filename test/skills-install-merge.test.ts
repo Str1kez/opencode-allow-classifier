@@ -229,6 +229,46 @@ test("install inserts the external_directory ask rule before foreign external ru
   ]);
 });
 
+test("install keeps a comment attached to the foreign external rule", (t) => {
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    // Reference data stays readable.
+    { "action": "external_directory", "resource": "/reference/*", "effect": "allow" },
+  ],
+}
+`;
+  const { read, result } = install(t, original);
+
+  assert.equal(result.status, 0, result.stderr);
+  const lines = read().split("\n");
+  const catchAllLine = lines.findIndex(
+    (line) => line.includes('"action": "external_directory"') && line.includes('"resource": "*"'),
+  );
+  const commentLine = lines.findIndex((line) => line.includes("// Reference data stays readable."));
+  const foreignLine = lines.findIndex((line) => line.includes('"resource": "/reference/*"'));
+
+  assert.ok(catchAllLine >= 0 && catchAllLine < commentLine, "catch-all is inserted before the comment");
+  assert.equal(commentLine + 1, foreignLine, "the comment stays directly above the foreign rule");
+});
+
+test("install refuses more than one external_directory catch-all rule", (t) => {
+  const original = `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
+  ],
+}
+`;
+  const { read, result } = install(t, original);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /multiple external_directory rules at indexes 1, 2/);
+  assert.match(result.stderr, /file left unchanged/);
+  assert.equal(read(), original);
+});
+
 test("install refuses a conflicting external_directory rule", (t) => {
   const original = `{
   "permissions": [

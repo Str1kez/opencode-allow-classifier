@@ -403,6 +403,37 @@ test("inspect reports an external_directory rule with a different effect", (t) =
   );
 });
 
+test("inspect warns when a narrower external_directory rule precedes the catch-all", (t) => {
+  const directory = scratch(t);
+  const config = join(directory, "opencode.jsonc");
+  writeFileSync(
+    config,
+    `{
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "external_directory", "resource": "/reference/*", "effect": "allow" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" },
+  ],
+  "plugins": [{ "package": ${JSON.stringify(REPO_ROOT)}, "options": { "enabled": true } }],
+}
+`,
+  );
+
+  const result = run(["inspect", "--config", config, "--json"], { cwd: directory });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout) as { warnings: string[] };
+  assert.ok(
+    report.warnings.some((warning) =>
+      /external_directory rule "\/reference\/\*" at index 1 comes before the catch-all at index 2/.test(warning),
+    ),
+  );
+
+  const text = run(["inspect", "--config", config], { cwd: directory });
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /external directory ask rule: yes/);
+  assert.match(text.stdout, /the narrower rule is dead/);
+});
+
 test("inspect does not read the kill switch from a foreign plugin entry", (t) => {
   const directory = scratch(t);
   const config = join(directory, "opencode.jsonc");
