@@ -78,6 +78,17 @@
   `--include-sandbox`.
 - Раздел README о скиллах: назначение, команды и границы. В `GLOSSARY.md`
   добавлены «сигнатура команды» и «ask-кластер».
+- Read-only формы получают детерминированный `allow` через allowlist:
+  `sed -n 'Np'`/`'N,Mp'`, `gh` с `issue`/`pr`/`repo`/`run`/`release`/
+  `workflow` и `view`/`list`, `gh --version`, `git worktree list`,
+  `git remote get-url`, `git merge-base`, `git ls-files`, `git rev-list`,
+  `git for-each-ref`, `git config --get`, `git describe`, `git shortlog`,
+  а также `cut`, `tr`, `nl`, `strings`, `printf`, `true`, `sleep` и `sort`.
+  Глобальные флаги git (`-C`, `--no-pager`) больше не мешают allowlist,
+  но путь из `-C` вне cwd спрашивает. Новые гарды: `sort -o`/`--output`,
+  `sort --compress-program` и `git -c`/`--config-env`/`--exec-path=`
+  (`git-command-override`). `cd` в allowlist не входит; неизвестные формы
+  `sed` уходят к классификатору, а не запрещаются.
 
 ### Изменено
 

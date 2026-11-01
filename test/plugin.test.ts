@@ -471,6 +471,15 @@ test("git global flags do not block the allowlist and -C stays inside cwd", asyn
       assert.equal(input.effect, "ask", `${command} must ask`);
       assert.equal(harness.auditEntries().at(-1)?.["rule"], rule, command);
     }
+
+    // A spaced `--exec-path` is not a value for git, and `--paginate` can force a configured pager:
+    // neither is a global flag the allowlist may skip.
+    for (const command of ["git --exec-path evil log", "git --paginate log"]) {
+      const input = evaluation({ resources: [command] });
+      await harness.evaluate(input);
+      assert.equal(input.effect, "ask", `${command} must ask`);
+      assert.equal(harness.auditEntries().at(-1)?.["rule"], "classifier", command);
+    }
   } finally {
     harness.dispose();
   }
@@ -493,6 +502,9 @@ test("pipeline helpers are allowed and sort cannot write a file", async () => {
     ["sort -o out.txt file", "guard:sort-output"],
     ["sort --output=out.txt file", "guard:sort-output"],
     ["sort -ro out.txt file", "guard:sort-output"],
+    ["sort --compress-program=./evil big.txt", "guard:sort-compress-program"],
+    ["sort --compress-program ./evil big.txt", "guard:sort-compress-program"],
+    ["sort --compress-p ./evil big.txt", "guard:sort-compress-program"],
   ];
 
   try {

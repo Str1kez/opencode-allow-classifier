@@ -84,8 +84,10 @@
    остаются hard-ask.
 2. **Allowlist с гардом** — `allow` без модели: `ls`, `pwd`, `cat`, `head`,
    `tail`, `wc`, `cut`, `tr`, `nl`, `strings`, `printf`, `true`, `sleep`,
-   `sort`, `file`, `stat`, `du`, `df`, `which`, `echo`, `date`, `whoami`,
-   `uname`, `rg`, `grep`, `jq`, `find`, `sed -n 'Np'` и `sed -n 'N,Mp'`
+   `sort` без `-o`/`--output` и без `--compress-program` (`sort -T .` пишет
+   временные файлы внутри cwd и удаляет их сам), `file`, `stat`, `du`, `df`,
+   `which`, `echo`, `date`, `whoami`, `uname`, `rg`, `grep`, `jq`, `find`,
+   `sed -n 'Np'` и `sed -n 'N,Mp'`
    (только диапазон печати: `-i`, `-e`, `w`, `s///` и шаг `1~2p` уходят
    к классификатору),
    `gh --version` и `gh` с группами `issue`, `pr`, `repo`, `run`, `release`,
@@ -221,7 +223,9 @@
 - подмена того, что запускает git: `git -c key=value`, `git --config-env=VAR key`
   и `git --exec-path=DIR` (`guard:git-command-override`) — конфиг может
   называть программу, а `--exec-path` меняет каталог подкоманд;
-- исполнение чужих программ: `rg --pre`, `git --ext-diff`/`--textconv`;
+- исполнение чужих программ: `rg --pre`, `git --ext-diff`/`--textconv`,
+  `sort --compress-program` (включая сокращённое `--compress-p`) — sort
+  запускает указанную программу на временных файлах;
 - чтение файла в обход позиционного аргумента: `--contents`, `--slurpfile`,
   `--rawfile`, `--from-file`, `jq -f` (jq-программа может напечатать `env`);
 - команды, которые меняют состояние, притворяясь чтением: `date -s`/
@@ -302,7 +306,13 @@ System-контекст — отдельный остаточный риск. Е
 - `git -C ./sub log` разрешён, `git -C /tmp log` спрашивает с
   `guard:outside-cwd`.
 - `sort -o out.txt file` спрашивает с `guard:sort-output`;
-  `git -c core.pager=cat log` — с `guard:git-command-override`.
+  `sort --compress-program=./evil big.txt` — с
+  `guard:sort-compress-program`; `git -c core.pager=cat log` — с
+  `guard:git-command-override`.
+- `git --exec-path=. log` спрашивает с `guard:git-command-override`, а
+  `git --exec-path evil log` и `git --paginate log` уходят к классификатору:
+  пробельная форма `--exec-path` не задаёт путь, а принудительный pager
+  берёт программу из конфига.
 - `cd /tmp` по-прежнему спрашивает: `cd` в allowlist не входит.
 
 ## Аудит

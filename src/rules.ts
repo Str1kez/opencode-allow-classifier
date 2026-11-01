@@ -253,6 +253,9 @@ export const GUARD_RULES: readonly GuardRule[] = [
   // `sort -o FILE` and `sort --output=FILE` write. `-ro out` carries the same flag inside a cluster.
   { name: "sort-output", kind: "short-cluster", values: ["o"], program: "sort" },
   { name: "sort-output", kind: "long-flag", value: "--output", program: "sort" },
+  // `sort --compress-program=PROG` runs PROG on temporary files; the long-flag prefix match also
+  // catches the abbreviated `--compress-p` that GNU getopt accepts.
+  { name: "sort-compress-program", kind: "long-flag", value: "--compress-program", program: "sort" },
   // `-o` is an output flag only for git. For `find` it is the OR operator, for `grep`/`rg` it means
   // "only matching"; no allowlisted program writes through it.
   { name: "output-short-flag", kind: "short-flag", value: "-o", program: "git" },

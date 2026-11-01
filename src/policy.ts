@@ -61,10 +61,21 @@ const WRAPPER_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir", "-o", "--
  * Global flags that stand between a program and its subcommand. Values are written as separate tokens
  * (`git -C /tmp push`) or attached (`--git-dir=/x`), which is why both forms are handled.
  */
-const PROGRAM_GLOBAL_FLAGS: Readonly<Record<string, { readonly withValue: readonly string[]; readonly boolean: readonly string[] }>> = {
+interface GlobalFlags {
+  readonly withValue: readonly string[];
+  readonly boolean: readonly string[];
+  /**
+   * Flags that take a value only attached (`--flag=value`). The spaced form is not a value: git
+   * accepts `--exec-path=X` only, so `git --exec-path foo log` never runs `log` and must not match it.
+   */
+  readonly attachedValue?: readonly string[];
+}
+
+const PROGRAM_GLOBAL_FLAGS: Readonly<Record<string, GlobalFlags>> = {
   git: {
-    withValue: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"],
-    boolean: ["--no-pager", "--paginate", "--bare", "--literal-pathspecs", "--no-replace-objects", "--no-optional-locks"],
+    withValue: ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"],
+    boolean: ["--no-pager", "--bare", "--literal-pathspecs", "--no-replace-objects", "--no-optional-locks"],
+    attachedValue: ["--exec-path"],
   },
   npm: {
     withValue: ["--prefix", "--registry", "--cache", "--userconfig", "--loglevel", "--workspace", "-w"],
@@ -127,6 +138,12 @@ function globalFlagsLength(program: string, args: ReadonlyArray<string>): number
 
     if (flags.withValue.includes(name)) {
       index += token.includes("=") ? 1 : 2;
+      continue;
+    }
+    if (flags.attachedValue?.includes(name) === true) {
+      // The spaced form is not a global flag at all; stop here so the allowlist does not match.
+      if (!token.includes("=")) break;
+      index++;
       continue;
     }
     if (flags.boolean.includes(token)) {
@@ -211,7 +228,9 @@ function matchesAllowlist(rule: AllowlistRule, tokens: ReadonlyArray<string>): b
   if (rule.script !== undefined) {
     const script = args[0];
     if (script === undefined || !rule.script.test(script)) return false;
-    // Only file operands may follow the script: `sed -n '1p' file -i` still edits in place.
+    // Everything after the script must be a file operand. Any flag (`-i`, `-e`) and the `--`
+    // terminator reject the rule: `sed -n '1p' file -i` still edits in place, and the terminator is
+    // not worth reasoning about.
     if (args.slice(1).some((token) => token.startsWith("-") && token !== "-")) return false;
   }
 
